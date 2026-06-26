@@ -1,0 +1,9 @@
+{
+  "api_key": "put-your-financial-modeling-prep-api-key-here",
+  "account_base_hkd": 4000000,
+  "reporting_currency": "USD",
+  "share_password": "change-this-password",
+  "transaction_file": "C:\\Users\\Admin\\Desktop\\2026 Equity PnL.xlsx",
+  "transaction_sheet": "Transaction History",
+  "refresh_seconds": 60
+}

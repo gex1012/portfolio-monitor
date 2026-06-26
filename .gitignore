@@ -1,0 +1,9 @@
+config.local.json
+.streamlit/secrets.toml
+data/
+uploads/
+__pycache__/
+*.pyc
+server-*.log
+server-*.err
+*.log

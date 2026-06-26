@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Equity PnL Monitor</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Equity PnL Monitor</h1>
+      <p id="sourceLine">Loading account...</p>
+      <p id="fxLine">FX loading...</p>
+    </div>
+    <div class="top-actions">
+      <a class="navlink" href="#stockPanel">个股</a>
+      <a class="navlink" href="#indexPage">指数</a>
+      <a class="navlink" href="#macroPage">宏观</a>
+      <button id="refreshBtn" class="primary">Refresh</button>
+      <label class="upload">Upload Excel<input id="excelUpload" type="file" accept=".xlsx,.xls"></label>
+    </div>
+  </header>
+
+  <main>
+    <section class="band">
+      <div class="metric-grid">
+        <div class="metric"><span>Account Equity</span><strong id="equity">-</strong><small>Base converted from HKD 4,000,000</small></div>
+        <div class="metric"><span>Total PnL</span><strong id="totalPnl">-</strong><small id="totalPct">-</small></div>
+        <div class="metric"><span>Realized PnL</span><strong id="realizedPnl">-</strong><small>Closed trades</small></div>
+        <div class="metric"><span>Unrealized PnL</span><strong id="unrealizedPnl">-</strong><small>Current holdings</small></div>
+      </div>
+    </section>
+
+    <section class="toolbar">
+      <form id="tradeForm" class="trade-form">
+        <select name="side"><option value="BUY">BUY</option><option value="SELL">SELL</option></select>
+        <input name="symbol" placeholder="Symbol, e.g. NVDA / 0700" required>
+        <input name="quantity" type="number" min="0" step="any" placeholder="Qty" required>
+        <input name="price" type="number" min="0" step="any" placeholder="Price" required>
+        <input name="currency" placeholder="Currency" list="ccys">
+        <datalist id="ccys"><option>HKD</option><option>USD</option><option>CNY</option></datalist>
+        <input name="fee" type="number" min="0" step="any" placeholder="Fee auto">
+        <input name="date" type="date">
+        <button class="primary" type="submit">Add Trade</button>
+      </form>
+      <form id="naturalForm" class="natural-form">
+        <input name="text" placeholder="例：买100股 英伟达 / sell 20 NVDA @ 150">
+        <button type="submit">Parse</button>
+      </form>
+      <p id="tradeMsg"></p>
+    </section>
+
+    <section class="split">
+      <div>
+        <div class="section-head"><h2>Active Holdings</h2><span id="holdingCount">0</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Qty</th>
+                <th>Avg Cost</th>
+                <th>Last</th>
+                <th class="sortable" data-sort="market_value_usd" data-label="Market Value USD">Market Value USD</th>
+                <th class="sortable" data-sort="unrealized_pnl_usd" data-label="Unrealized USD">Unrealized USD</th>
+                <th class="sortable" data-sort="changes_percentage" data-label="Day">Day</th>
+                <th class="sortable" data-sort="rs_vs_nq_20d" data-label="RS NQ">RS NQ</th>
+                <th class="sortable" data-sort="rs_vs_sp_20d" data-label="RS SP">RS SP</th>
+              </tr>
+            </thead>
+            <tbody id="holdingsBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <aside>
+        <div class="section-head"><h2>Stock Projects</h2><span id="projectCount">0</span></div>
+        <div id="projectList" class="project-list"></div>
+      </aside>
+    </section>
+
+    <section class="detail" id="indexPage">
+      <div class="section-head"><h2>指数怎么走</h2><button id="indexBtn">Refresh Indexes</button></div>
+      <div id="indexList" class="index-grid"></div>
+    </section>
+
+    <section class="detail" id="stockPanel">
+      <div class="section-head"><h2 id="stockTitle">Stock Detail</h2><span id="stockStatus">Select a project</span></div>
+      <div class="detail-grid">
+        <div class="chart-block"><canvas id="priceChart" width="900" height="360"></canvas></div>
+        <div>
+          <h3>技术点位与操作建议</h3>
+          <div id="adviceBox" class="advice"></div>
+          <ul id="signals"></ul>
+        </div>
+      </div>
+      <div class="detail-grid">
+        <div><h3>筹码 / 成交密集区</h3><div id="volumeProfile" class="bars"></div></div>
+        <div><h3>期权 OI 分布</h3><div id="optionsBox" class="bars"></div></div>
+      </div>
+      <div>
+        <h3>过去24小时新闻与热度</h3>
+        <div id="heatLine" class="heat"></div>
+        <ul id="newsList" class="news"></ul>
+      </div>
+    </section>
+
+    <section class="detail" id="macroPage">
+      <div class="section-head"><h2>宏观数据 / Macro 24h</h2><button id="macroBtn">Load Macro</button></div>
+      <div id="macroAnalysis" class="advice"></div>
+      <div id="macroList" class="macro"></div>
+    </section>
+
+    <section class="detail">
+      <div class="section-head"><h2>Realized PnL</h2></div>
+      <div class="table-wrap compact">
+        <table>
+          <thead><tr><th>Date</th><th>Symbol</th><th>Qty</th><th>Price</th><th>PnL USD</th><th>Source</th></tr></thead>
+          <tbody id="realizedBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
