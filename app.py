@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import cgi
 import datetime as dt
 import json
 import math
@@ -18,6 +17,11 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+try:
+    import cgi
+except ModuleNotFoundError:
+    cgi = None
 
 
 ROOT = Path(__file__).resolve().parent
@@ -1469,6 +1473,9 @@ class AppHandler(BaseHTTPRequestHandler):
             respond_json(self, {"ok": False, "error": str(exc)}, 400)
 
     def handle_upload(self) -> None:
+        if cgi is None:
+            respond_json(self, {"ok": False, "error": "Excel upload is not available on this Python runtime."}, 501)
+            return
         ctype, _ = cgi.parse_header(self.headers.get("Content-Type", ""))
         if ctype != "multipart/form-data":
             respond_json(self, {"ok": False, "error": "Upload must be multipart/form-data."}, 400)
