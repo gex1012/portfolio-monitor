@@ -1,6 +1,7 @@
 const SHEET_ID = '1a9ahW9brvGS6B2QMDgUwRQmLRXiHDKecX4G-oZ8acFQ';
 const TRADES_SHEET = 'Trades';
 const AUDIT_SHEET = 'Audit Log';
+const OPTION_OI_SHEET = 'Option OI History';
 
 const TRADE_HEADERS = [
   'id',
@@ -28,6 +29,22 @@ const AUDIT_HEADERS = [
   'quantity',
   'price',
   'note'
+];
+
+const OPTION_OI_HEADERS = [
+  'date',
+  'symbol',
+  'total_call_oi',
+  'total_put_oi',
+  'put_call_oi_ratio',
+  'call_put_oi_ratio',
+  'nearest_expiry',
+  'nearest_max_call_oi_strike',
+  'nearest_max_call_oi',
+  'nearest_max_put_oi_strike',
+  'nearest_max_put_oi',
+  'source',
+  'timestamp'
 ];
 
 function ok(payload) {
@@ -92,6 +109,32 @@ function appendRow(name, headers, item) {
   sheet.appendRow(row);
 }
 
+function upsertOptionOiHistory(item) {
+  const sheet = getSheet(OPTION_OI_SHEET, OPTION_OI_HEADERS);
+  const rowItem = item || {};
+  const targetDate = String(rowItem.date || '').trim();
+  const targetSymbol = String(rowItem.symbol || '').trim().toUpperCase();
+  if (!targetDate || !targetSymbol) {
+    throw new Error('Option OI row needs date and symbol.');
+  }
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    const values = sheet.getRange(2, 1, lastRow - 1, OPTION_OI_HEADERS.length).getValues();
+    for (let i = 0; i < values.length; i += 1) {
+      const dateValue = values[i][0] instanceof Date
+        ? Utilities.formatDate(values[i][0], 'Etc/UTC', 'yyyy-MM-dd')
+        : String(values[i][0] || '').slice(0, 10);
+      const symbolValue = String(values[i][1] || '').trim().toUpperCase();
+      if (dateValue === targetDate && symbolValue === targetSymbol) {
+        const row = OPTION_OI_HEADERS.map(header => rowItem[header] !== undefined ? rowItem[header] : '');
+        sheet.getRange(i + 2, 1, 1, OPTION_OI_HEADERS.length).setValues([row]);
+        return;
+      }
+    }
+  }
+  appendRow(OPTION_OI_SHEET, OPTION_OI_HEADERS, rowItem);
+}
+
 function doGet() {
   try {
     getSheet(TRADES_SHEET, TRADE_HEADERS);
@@ -111,6 +154,7 @@ function doPost(e) {
     if (action === 'setup') {
       getSheet(TRADES_SHEET, TRADE_HEADERS);
       getSheet(AUDIT_SHEET, AUDIT_HEADERS);
+      getSheet(OPTION_OI_SHEET, OPTION_OI_HEADERS);
       return ok({ message: 'Sheets are ready.' });
     }
 
@@ -122,12 +166,21 @@ function doPost(e) {
       return ok({ rows: readRows(AUDIT_SHEET, AUDIT_HEADERS) });
     }
 
+    if (action === 'read_option_oi_history') {
+      return ok({ rows: readRows(OPTION_OI_SHEET, OPTION_OI_HEADERS) });
+    }
+
     if (action === 'append_trade') {
       appendRow(TRADES_SHEET, TRADE_HEADERS, body.trade || {});
       if (body.audit) {
         appendRow(AUDIT_SHEET, AUDIT_HEADERS, body.audit);
       }
       return ok({ message: 'Trade appended.' });
+    }
+
+    if (action === 'upsert_option_oi_history') {
+      upsertOptionOiHistory(body.row || {});
+      return ok({ message: 'Option OI history upserted.' });
     }
 
     throw new Error(`Unknown action: ${action}`);

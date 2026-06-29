@@ -21,6 +21,7 @@ import streamlit.components.v1 as components
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 LOCAL_TRADES_PATH = DATA_DIR / "streamlit_trades.json"
+LOCAL_OPTION_OI_PATH = DATA_DIR / "option_oi_history.json"
 TRADE_HEADERS = [
     "id",
     "date",
@@ -38,6 +39,21 @@ TRADE_HEADERS = [
     "created_at",
 ]
 AUDIT_HEADERS = ["timestamp", "user", "action", "symbol", "side", "quantity", "price", "note"]
+OPTION_OI_HEADERS = [
+    "date",
+    "symbol",
+    "total_call_oi",
+    "total_put_oi",
+    "put_call_oi_ratio",
+    "call_put_oi_ratio",
+    "nearest_expiry",
+    "nearest_max_call_oi_strike",
+    "nearest_max_call_oi",
+    "nearest_max_put_oi_strike",
+    "nearest_max_put_oi",
+    "source",
+    "timestamp",
+]
 
 
 st.set_page_config(page_title="Equity PnL Monitor", page_icon="📈", layout="wide")
@@ -263,6 +279,103 @@ def load_audit() -> list[dict[str, Any]]:
     if not google_sheet_enabled():
         return []
     return read_sheet_rows(str(secret_value("google_sheets", "audit_worksheet", default="Audit Log")), AUDIT_HEADERS)
+
+
+def normalize_option_oi_row(row: dict[str, Any]) -> dict[str, Any]:
+    clean = {key: row.get(key, "") for key in OPTION_OI_HEADERS}
+    clean["date"] = clean_text(clean.get("date")) or dt.date.today().isoformat()
+    clean["symbol"] = clean_text(clean.get("symbol")).upper()
+    clean["source"] = clean_text(clean.get("source")) or "Cboe delayed quotes"
+    clean["timestamp"] = clean_text(clean.get("timestamp")) or now_iso()
+    for key in [
+        "total_call_oi",
+        "total_put_oi",
+        "put_call_oi_ratio",
+        "call_put_oi_ratio",
+        "nearest_max_call_oi_strike",
+        "nearest_max_call_oi",
+        "nearest_max_put_oi_strike",
+        "nearest_max_put_oi",
+    ]:
+        clean[key] = to_float(clean.get(key))
+    return clean
+
+
+def option_oi_row(symbol: str, options: dict[str, Any]) -> dict[str, Any] | None:
+    if not options.get("available"):
+        return None
+    summary = options.get("summary", {})
+    total_call = to_float(summary.get("total_call_oi"))
+    total_put = to_float(summary.get("total_put_oi"))
+    if total_call <= 0 and total_put <= 0:
+        return None
+    return normalize_option_oi_row(
+        {
+            "date": dt.date.today().isoformat(),
+            "symbol": clean_text(symbol).upper(),
+            "total_call_oi": total_call,
+            "total_put_oi": total_put,
+            "put_call_oi_ratio": summary.get("put_call_oi_ratio"),
+            "call_put_oi_ratio": summary.get("call_put_oi_ratio"),
+            "nearest_expiry": summary.get("nearest_expiry") or "",
+            "nearest_max_call_oi_strike": summary.get("nearest_max_call_oi_strike"),
+            "nearest_max_call_oi": summary.get("nearest_max_call_oi"),
+            "nearest_max_put_oi_strike": summary.get("nearest_max_put_oi_strike"),
+            "nearest_max_put_oi": summary.get("nearest_max_put_oi"),
+            "source": options.get("source") or "Cboe delayed quotes",
+            "timestamp": now_iso(),
+        }
+    )
+
+
+def load_local_option_oi_history() -> list[dict[str, Any]]:
+    if not LOCAL_OPTION_OI_PATH.exists():
+        return []
+    try:
+        data = json.loads(LOCAL_OPTION_OI_PATH.read_text(encoding="utf-8"))
+        return [normalize_option_oi_row(row) for row in data] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def upsert_local_option_oi_history(row: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    rows = load_local_option_oi_history()
+    key = (row["date"], row["symbol"])
+    kept = [item for item in rows if (item.get("date"), item.get("symbol")) != key]
+    kept.append(row)
+    kept.sort(key=lambda x: (x.get("symbol", ""), x.get("date", "")))
+    LOCAL_OPTION_OI_PATH.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def record_option_oi_history(symbol: str, options: dict[str, Any]) -> tuple[bool, str]:
+    row = option_oi_row(symbol, options)
+    if not row:
+        return False, "No live option OI snapshot to record."
+    try:
+        if apps_script_enabled():
+            apps_script_call("upsert_option_oi_history", {"row": row})
+            return True, "Option OI snapshot recorded to Google Sheet."
+        upsert_local_option_oi_history(row)
+        return True, "Option OI snapshot recorded locally."
+    except Exception as exc:
+        return False, f"Option OI history not recorded: {exc}"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_option_oi_history_cached(cache_key: str) -> list[dict[str, Any]]:
+    if apps_script_enabled():
+        rows = apps_script_call("read_option_oi_history").get("rows", [])
+        return [normalize_option_oi_row(row) for row in rows if clean_text(row.get("symbol"))]
+    return load_local_option_oi_history()
+
+
+def load_option_oi_history() -> list[dict[str, Any]]:
+    key = "cloud" if apps_script_enabled() else str(LOCAL_OPTION_OI_PATH.stat().st_mtime if LOCAL_OPTION_OI_PATH.exists() else 0)
+    try:
+        return load_option_oi_history_cached(key)
+    except Exception:
+        return load_local_option_oi_history()
 
 
 def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -978,6 +1091,75 @@ def render_options_html(options: dict[str, Any]) -> str:
     return "".join(html)
 
 
+def render_option_oi_history(symbol: str) -> None:
+    history = pd.DataFrame(load_option_oi_history())
+    symbol = clean_text(symbol).upper()
+    st.markdown("#### Option OI History")
+    if history.empty:
+        st.info("No option OI history yet. It will start recording from today.")
+        return
+    history = history[history["symbol"].astype(str).str.upper() == symbol].copy()
+    if history.empty:
+        st.info("No option OI history for this stock yet. It will start recording from today.")
+        return
+    history["date"] = pd.to_datetime(history["date"], errors="coerce")
+    history = history.dropna(subset=["date"]).sort_values("date")
+    for col in ["total_call_oi", "total_put_oi", "put_call_oi_ratio", "call_put_oi_ratio"]:
+        history[col] = pd.to_numeric(history[col], errors="coerce")
+    chart_rows = history.tail(520)
+    ratio_chart = (
+        alt.Chart(chart_rows)
+        .mark_line(point=True, strokeWidth=2)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("put_call_oi_ratio:Q", title="Put/Call OI", scale=alt.Scale(zero=False)),
+            color=alt.value("#b45309"),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date", format="%Y-%m-%d"),
+                alt.Tooltip("put_call_oi_ratio:Q", title="Put/Call OI", format=".2f"),
+                alt.Tooltip("call_put_oi_ratio:Q", title="Call/Put OI", format=".2f"),
+                alt.Tooltip("total_call_oi:Q", title="Call OI", format=",.0f"),
+                alt.Tooltip("total_put_oi:Q", title="Put OI", format=",.0f"),
+            ],
+        )
+        .properties(height=260)
+    )
+    oi_long = chart_rows.melt(
+        id_vars=["date"],
+        value_vars=["total_call_oi", "total_put_oi"],
+        var_name="Type",
+        value_name="Open Interest",
+    )
+    oi_long["Type"] = oi_long["Type"].replace({"total_call_oi": "Call OI", "total_put_oi": "Put OI"})
+    oi_chart = (
+        alt.Chart(oi_long)
+        .mark_line(point=True, strokeWidth=2)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("Open Interest:Q", title="Open Interest"),
+            color=alt.Color("Type:N", scale=alt.Scale(range=["#176b87", "#a66a00"]), legend=alt.Legend(title=None, orient="bottom")),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date", format="%Y-%m-%d"),
+                alt.Tooltip("Type:N", title="Type"),
+                alt.Tooltip("Open Interest:Q", title="Open Interest", format=",.0f"),
+            ],
+        )
+        .properties(height=260)
+    )
+    left, right = st.columns(2, gap="medium")
+    with left:
+        st.caption("Put/Call OI ratio")
+        st.altair_chart(ratio_chart, use_container_width=True)
+    with right:
+        st.caption("Total Call vs Put OI")
+        st.altair_chart(oi_chart, use_container_width=True)
+    latest = history.iloc[-1]
+    st.caption(
+        f"Latest snapshot: {latest['date'].date()} | Call OI {latest['total_call_oi']:,.0f} | "
+        f"Put OI {latest['total_put_oi']:,.0f} | Put/Call {latest['put_call_oi_ratio']:.2f}"
+    )
+
+
 def signed_text(value: Any, percent: bool = True) -> str:
     try:
         num = float(value)
@@ -1212,6 +1394,10 @@ def render_stock_detail(portfolio: dict[str, Any]) -> None:
     with st.spinner("Loading stock detail..."):
         detail = core.stock_detail(symbol)
     tech = detail.get("technical", {})
+    options = detail.get("options", {})
+    recorded, record_msg = record_option_oi_history(symbol, options)
+    if recorded:
+        load_option_oi_history_cached.clear()
     advice = tech.get("advice", {})
     signals = tech.get("signals", [])[:10]
     col_chart, col_side = st.columns([1.35, 0.65], gap="medium")
@@ -1249,11 +1435,15 @@ def render_stock_detail(portfolio: dict[str, Any]) -> None:
             f"""
             <div class="panel-card">
               <h4>期权 OI 分布</h4>
-              {render_options_html(detail.get("options", {}))}
+              {render_options_html(options)}
             </div>
             """,
             unsafe_allow_html=True,
         )
+        if record_msg:
+            st.caption(record_msg)
+
+    render_option_oi_history(symbol)
 
     news = detail.get("news", {})
     sentiment = news.get("sentiment", {})

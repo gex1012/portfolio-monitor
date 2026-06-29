@@ -84,6 +84,8 @@ url = "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL"
 token = "make-a-long-random-token"
 ```
 
+When `apps_script_code.gs` changes, paste the new file into Apps Script and deploy a new web-app version. The option OI history recorder needs the `Option OI History` sheet actions from the latest script.
+
 ## Streamlit Cloud Deployment
 
 1. Push this folder to a private GitHub repo.
