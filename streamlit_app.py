@@ -798,7 +798,46 @@ def signed_span(value: Any, percent: bool = True) -> str:
     return f'<span style="color:{color};font-weight:700;">{text}</span>'
 
 
+def signed_text(value: Any, percent: bool = True) -> str:
+    try:
+        num = float(value)
+    except Exception:
+        return "-"
+    return f"{num * 100:+.2f}%" if percent else f"{num:+,.2f}"
+
+
 def render_index_strip() -> None:
+    try:
+        data = core.index_overview()
+        items = data.get("items", [])
+    except Exception as exc:
+        st.warning(f"Index data unavailable: {exc}")
+        return
+    if not items:
+        st.info("Index data unavailable.")
+        return
+    cols = st.columns(min(3, len(items)))
+    for col, item in zip(cols, items):
+        with col:
+            name = clean_text(item.get("name")) or "-"
+            symbol = clean_text(item.get("symbol")) or "-"
+            st.markdown(f"**{name}** `{symbol}`")
+            if item.get("available"):
+                st.metric(
+                    "Last / 1D",
+                    f"{to_float(item.get('last')):,.2f}",
+                    signed_text(item.get("day_return")),
+                )
+                c1, c2, c3 = st.columns(3)
+                c1.metric("5D", signed_text(item.get("return_5d")))
+                c2.metric("20D", signed_text(item.get("return_20d")))
+                c3.metric("60D", signed_text(item.get("return_60d")))
+                st.caption(f"{clean_text(item.get('trend')) or '-'}｜{clean_text(item.get('comment'))}")
+            else:
+                st.warning(clean_text(item.get("comment")) or "No data")
+
+
+def render_index_strip_html() -> None:
     try:
         data = core.index_overview()
         items = data.get("items", [])
