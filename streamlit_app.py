@@ -582,6 +582,51 @@ def inject_styles() -> None:
           text-decoration: none;
           font-weight: 600;
         }
+        .index-strip {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(220px, 1fr));
+          gap: 10px;
+          margin: 14px 0 18px;
+        }
+        .index-card {
+          border: 1px solid #e5e7eb;
+          border-left: 4px solid #176b87;
+          border-radius: 8px;
+          background: #fff;
+          padding: 12px;
+          min-height: 126px;
+        }
+        .index-card h4 {
+          display: flex;
+          justify-content: space-between;
+          margin: 0 0 8px;
+          color: #172033;
+          font-size: 15px;
+        }
+        .index-card h4 span {
+          color: #64748b;
+          font-weight: 600;
+          font-size: 12px;
+        }
+        .index-price {
+          font-size: 20px;
+          font-weight: 700;
+          color: #172033;
+          margin-bottom: 8px;
+        }
+        .index-returns {
+          display: grid;
+          grid-template-columns: repeat(4, auto);
+          justify-content: start;
+          gap: 8px;
+          font-size: 12px;
+          margin-bottom: 8px;
+        }
+        .index-comment {
+          color: #475569;
+          font-size: 12px;
+          line-height: 1.4;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -743,6 +788,52 @@ def render_options_html(options: dict[str, Any]) -> str:
     return "".join(html)
 
 
+def signed_span(value: Any, percent: bool = True) -> str:
+    try:
+        num = float(value)
+    except Exception:
+        return '<span style="color:#64748b;">-</span>'
+    color = "#15803d" if num >= 0 else "#b91c1c"
+    text = f"{num * 100:+.2f}%" if percent else f"{num:+,.2f}"
+    return f'<span style="color:{color};font-weight:700;">{text}</span>'
+
+
+def render_index_strip() -> None:
+    try:
+        data = core.index_overview()
+        items = data.get("items", [])
+    except Exception as exc:
+        st.warning(f"Index data unavailable: {exc}")
+        return
+    cards = []
+    for item in items:
+        if not item.get("available"):
+            cards.append(
+                f"""
+                <div class="index-card">
+                  <h4>{clean_text(item.get('name'))}<span>{clean_text(item.get('symbol'))}</span></h4>
+                  <p class="index-comment">{clean_text(item.get('comment')) or 'No data'}</p>
+                </div>
+                """
+            )
+            continue
+        cards.append(
+            f"""
+            <div class="index-card">
+              <h4>{clean_text(item.get('name'))}<span>{clean_text(item.get('symbol'))}</span></h4>
+              <div class="index-price">{to_float(item.get('last')):,.2f} {signed_span(item.get('day_return'))}</div>
+              <div class="index-returns">
+                <span>5D {signed_span(item.get('return_5d'))}</span>
+                <span>20D {signed_span(item.get('return_20d'))}</span>
+                <span>60D {signed_span(item.get('return_60d'))}</span>
+              </div>
+              <div class="index-comment"><strong>{clean_text(item.get('trend')) or '-'}</strong> {clean_text(item.get('comment'))}</div>
+            </div>
+            """
+        )
+    st.markdown('<div class="index-strip">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
 def login_gate() -> tuple[str, str]:
     if "role" not in st.session_state:
         st.session_state.role = None
@@ -789,6 +880,8 @@ def render_overview(portfolio: dict[str, Any]) -> None:
         f"Spot FX used: USD/HKD {to_float(spot.get('USDHKD')):.4f} | "
         f"HKD/USD {to_float(to_usd.get('HKD')):.5f} | CNY/USD {to_float(to_usd.get('CNY')):.5f}"
     )
+    st.subheader("Index Tape")
+    render_index_strip()
 
     holdings = pd.DataFrame(portfolio["holdings"])
     if holdings.empty:
