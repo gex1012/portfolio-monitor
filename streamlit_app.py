@@ -324,6 +324,8 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
     market_value_total_usd = 0.0
     nq_ret = core.period_return("^NDX", 20)
     sp_ret = core.period_return("^GSPC", 20)
+    nq_ytd = period_return_ytd("^NDX")
+    sp_ytd = period_return_ytd("^GSPC")
     for symbol, pos in positions.items():
         qty = pos["quantity"]
         quote = quotes.get(symbol.upper(), {})
@@ -331,6 +333,7 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
         avg_cost = pos["cost"] / qty if qty else 0.0
         rate = fx.get(pos["currency"], 1.0)
         stock_ret = core.period_return(symbol, 20)
+        stock_ytd = period_return_ytd(symbol)
         market_value_usd = qty * last * rate
         unrealized_usd = ((last - avg_cost) * qty if qty else 0.0) * rate
         market_value_total_usd += market_value_usd
@@ -346,8 +349,11 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
                 "unrealized_pnl_usd": unrealized_usd,
                 "unrealized_pct": (last / avg_cost - 1) if avg_cost else 0,
                 "return_20d": stock_ret,
+                "return_ytd": stock_ytd,
                 "rs_vs_nq_20d": (stock_ret - nq_ret) if stock_ret is not None and nq_ret is not None else None,
                 "rs_vs_sp_20d": (stock_ret - sp_ret) if stock_ret is not None and sp_ret is not None else None,
+                "rs_vs_nq_ytd": (stock_ytd - nq_ytd) if stock_ytd is not None and nq_ytd is not None else None,
+                "rs_vs_sp_ytd": (stock_ytd - sp_ytd) if stock_ytd is not None and sp_ytd is not None else None,
                 "fx_to_usd": rate,
             }
         )
@@ -373,7 +379,7 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
         "projects": projects,
         "realized": realized_rows[-250:],
         "transactions": txs[-500:],
-        "benchmarks": {"nq_return_20d": nq_ret, "sp_return_20d": sp_ret},
+        "benchmarks": {"nq_return_20d": nq_ret, "sp_return_20d": sp_ret, "nq_return_ytd": nq_ytd, "sp_return_ytd": sp_ytd},
         "updated_at": now_iso(),
     }
 
@@ -466,6 +472,25 @@ def pct(value: Any) -> str:
     if value is None or pd.isna(value):
         return "-"
     return f"{float(value) * 100:+.2f}%"
+
+
+def period_return_ytd(symbol: str) -> float | None:
+    rows = core.historical_prices(symbol)
+    year = dt.date.today().year
+    ytd_rows: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            row_date = dt.date.fromisoformat(str(row.get("date", ""))[:10])
+        except Exception:
+            continue
+        close = to_float(row.get("close"))
+        if row_date.year == year and close > 0:
+            ytd_rows.append(row)
+    if len(ytd_rows) < 2:
+        return None
+    start = to_float(ytd_rows[0].get("close"))
+    end = to_float(ytd_rows[-1].get("close"))
+    return (end / start - 1) if start else None
 
 
 def inject_styles() -> None:
@@ -915,7 +940,7 @@ def render_overview(portfolio: dict[str, Any]) -> None:
           <div class="holding-card"><span>Profitable names</span><strong>{positive_count} / {len(holdings)}</strong></div>
           <div class="holding-card"><span>Largest position</span><strong>{biggest["symbol"]} · {money(biggest["market_value_usd"])}</strong></div>
         </div>
-        <div class="section-note">Sorted by market value. RS columns show 20D relative strength versus Nasdaq 100 and S&P 500.</div>
+        <div class="section-note">Sorted by market value. RS columns show YTD relative strength versus Nasdaq 100 and S&P 500.</div>
         """,
         unsafe_allow_html=True,
     )
@@ -929,8 +954,9 @@ def render_overview(portfolio: dict[str, Any]) -> None:
             "unrealized_pnl_usd",
             "unrealized_pct",
             "changes_percentage",
-            "rs_vs_nq_20d",
-            "rs_vs_sp_20d",
+            "return_ytd",
+            "rs_vs_nq_ytd",
+            "rs_vs_sp_ytd",
         ]
     ].rename(
         columns={
@@ -942,8 +968,9 @@ def render_overview(portfolio: dict[str, Any]) -> None:
             "unrealized_pnl_usd": "Unrealized",
             "unrealized_pct": "PnL %",
             "changes_percentage": "Day",
-            "rs_vs_nq_20d": "RS vs NQ",
-            "rs_vs_sp_20d": "RS vs SP",
+            "return_ytd": "YTD",
+            "rs_vs_nq_ytd": "RS NQ YTD",
+            "rs_vs_sp_ytd": "RS SP YTD",
         }
     )
     styled = view.style.format(
@@ -955,12 +982,13 @@ def render_overview(portfolio: dict[str, Any]) -> None:
             "Unrealized": "${:,.0f}",
             "PnL %": "{:+.2%}",
             "Day": "{:+.2f}%",
-            "RS vs NQ": "{:+.2%}",
-            "RS vs SP": "{:+.2%}",
+            "YTD": "{:+.2%}",
+            "RS NQ YTD": "{:+.2%}",
+            "RS SP YTD": "{:+.2%}",
         },
         na_rep="-",
     )
-    signed_cols = ["Unrealized", "PnL %", "Day", "RS vs NQ", "RS vs SP"]
+    signed_cols = ["Unrealized", "PnL %", "Day", "YTD", "RS NQ YTD", "RS SP YTD"]
     if hasattr(styled, "map"):
         styled = styled.map(color_signed, subset=signed_cols)
     else:
@@ -1098,28 +1126,253 @@ def render_stock_detail(portfolio: dict[str, Any]) -> None:
     )
 
 
-def render_macro_indexes() -> None:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Indexes")
-        try:
-            idx = core.index_overview()
-            rows = pd.DataFrame(idx.get("items", []))
-            if not rows.empty:
-                st.dataframe(rows[["name", "last", "day_return", "return_5d", "return_20d", "return_60d", "trend", "comment"]], use_container_width=True, hide_index=True)
-        except Exception as exc:
-            st.error(str(exc))
-    with c2:
-        st.subheader("Macro 24h")
-        try:
-            macro = core.macro_updates()
-            for line in macro.get("analysis", []):
-                st.write(line)
-            rows = pd.DataFrame(macro.get("items", []))
-            if not rows.empty:
-                st.dataframe(rows[["date", "country", "event", "impact", "actual", "estimate", "previous", "category"]], use_container_width=True, hide_index=True)
-        except Exception as exc:
-            st.error(str(exc))
+MACRO_KEYWORDS = [
+    "pce",
+    "cpi",
+    "ppi",
+    "inflation",
+    "pmi",
+    "ism",
+    "unemployment",
+    "jobless",
+    "claims",
+    "payroll",
+    "employment",
+    "fomc",
+    "fed",
+    "gdp",
+    "retail sales",
+    "durable goods",
+    "consumer confidence",
+    "personal income",
+    "personal spending",
+]
+
+
+def macro_priority(event: Any, impact: Any = "") -> str:
+    text = f"{event or ''} {impact or ''}".lower()
+    if any(word in text for word in ["pce", "cpi", "ppi", "unemployment", "payroll", "fomc", "fed"]):
+        return "Hot"
+    if any(word in text for word in MACRO_KEYWORDS):
+        return "Watch"
+    if str(impact or "").lower() == "high":
+        return "Hot"
+    if str(impact or "").lower() == "medium":
+        return "Watch"
+    return "Normal"
+
+
+def macro_priority_style(value: Any) -> str:
+    text = str(value).lower()
+    if text == "hot":
+        return "background-color:#fee2e2;color:#991b1b;font-weight:700"
+    if text == "watch":
+        return "background-color:#fef3c7;color:#92400e;font-weight:700"
+    return "color:#475569"
+
+
+def style_priority_table(df: pd.DataFrame) -> Any:
+    if df.empty or "Priority" not in df.columns:
+        return df
+    styled = df.style
+    if hasattr(styled, "map"):
+        return styled.map(macro_priority_style, subset=["Priority"])
+    return styled.applymap(macro_priority_style, subset=["Priority"])
+
+
+def weekly_macro_calendar(days: int = 7) -> list[dict[str, Any]]:
+    today = dt.date.today()
+    end = today + dt.timedelta(days=days)
+    data = core.fmp_get("/stable/economic-calendar", {"from": today.isoformat(), "to": end.isoformat()}, ttl=900)
+    if not isinstance(data, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in data:
+        event = clean_text(item.get("event") or item.get("name"))
+        impact = clean_text(item.get("impact") or item.get("importance"))
+        priority = macro_priority(event, impact)
+        text = event.lower()
+        if priority == "Normal" and not any(word in text for word in MACRO_KEYWORDS):
+            continue
+        rows.append(
+            {
+                "Date": clean_text(item.get("date")),
+                "Country": clean_text(item.get("country")),
+                "Event": event,
+                "Priority": priority,
+                "Impact": impact or "-",
+                "Estimate": clean_text(item.get("estimate") or item.get("consensus")) or "-",
+                "Previous": clean_text(item.get("previous")) or "-",
+            }
+        )
+    rows.sort(key=lambda x: (x["Date"], {"Hot": 0, "Watch": 1, "Normal": 2}.get(x["Priority"], 2)))
+    return rows[:30]
+
+
+def portfolio_event_calendar(symbols: list[str], days: int = 45) -> list[dict[str, Any]]:
+    wanted = {clean_text(symbol).upper() for symbol in symbols if clean_text(symbol)}
+    if not wanted:
+        return []
+    today = dt.date.today()
+    end = today + dt.timedelta(days=days)
+    rows: list[dict[str, Any]] = []
+
+    earnings = core.fmp_get("/stable/earnings-calendar", {"from": today.isoformat(), "to": end.isoformat()}, ttl=3600)
+    if isinstance(earnings, list):
+        for item in earnings:
+            symbol = clean_text(item.get("symbol") or item.get("ticker")).upper()
+            if symbol not in wanted:
+                continue
+            rows.append(
+                {
+                    "Date": clean_text(item.get("date")) or "-",
+                    "Symbol": symbol,
+                    "Type": "Earnings",
+                    "Detail": f"EPS est {clean_text(item.get('epsEstimated') or item.get('epsEstimate')) or '-'} | Revenue est {clean_text(item.get('revenueEstimated') or item.get('revenueEstimate')) or '-'}",
+                }
+            )
+
+    dividends = core.fmp_get("/stable/dividends-calendar", {"from": today.isoformat(), "to": end.isoformat()}, ttl=3600)
+    if isinstance(dividends, list):
+        for item in dividends:
+            symbol = clean_text(item.get("symbol") or item.get("ticker")).upper()
+            if symbol not in wanted:
+                continue
+            dividend = clean_text(item.get("dividend") or item.get("adjDividend"))
+            rows.append(
+                {
+                    "Date": clean_text(item.get("date") or item.get("exDividendDate")) or "-",
+                    "Symbol": symbol,
+                    "Type": "Dividend",
+                    "Detail": f"Dividend {dividend or '-'} | Record {clean_text(item.get('recordDate')) or '-'} | Pay {clean_text(item.get('paymentDate')) or '-'}",
+                }
+            )
+
+    rows.sort(key=lambda x: (x["Date"], x["Symbol"], x["Type"]))
+    return rows[:40]
+
+
+def macro_brief_lines(macro: dict[str, Any]) -> list[str]:
+    lines = [clean_text(line) for line in macro.get("analysis", []) if clean_text(line)]
+    if lines:
+        return lines[:4]
+    items = macro.get("items", [])[:4]
+    out = []
+    for item in items:
+        actual = clean_text(item.get("actual")) or "-"
+        estimate = clean_text(item.get("estimate")) or "-"
+        out.append(f"{clean_text(item.get('event'))}: actual {actual}, estimate {estimate}.")
+    return out or ["-"]
+
+
+def operation_notes(index_items: list[dict[str, Any]], macro: dict[str, Any]) -> list[str]:
+    notes: list[str] = []
+    weak_indexes = [
+        clean_text(item.get("name"))
+        for item in index_items
+        if to_float(item.get("return_20d")) < 0 and clean_text(item.get("name"))
+    ]
+    hot_macro = [
+        item
+        for item in macro.get("items", [])
+        if macro_priority(item.get("event"), item.get("impact") or item.get("importance")) == "Hot"
+    ]
+    if weak_indexes:
+        notes.append(f"指数短期仍偏谨慎：{', '.join(weak_indexes[:3])} 20D 回报为负，组合追高要更挑相对强势标的。")
+    else:
+        notes.append("指数短期没有明显系统性破坏，持仓可以继续按个股强弱和事件节奏管理。")
+    if hot_macro:
+        notes.append("本周和过去 24h 有通胀、就业或 Fed 类关键数据，建议控制高 beta 仓位的隔夜波动风险。")
+    notes.append("操作上优先保留 YTD 相对 NQ/SP 仍强的持仓；跌破关键均线且相对强弱转负的名字，先降低仓位或等待确认。")
+    return notes
+
+
+def render_macro_indexes(portfolio: dict[str, Any]) -> None:
+    st.subheader("Macro Brief")
+    try:
+        macro = core.macro_updates()
+    except Exception as exc:
+        st.error(str(exc))
+        macro = {"analysis": [], "items": []}
+    try:
+        idx = core.index_overview()
+        index_items = idx.get("items", [])
+    except Exception as exc:
+        st.error(str(exc))
+        index_items = []
+
+    top_left, top_right = st.columns([1.15, 0.85], gap="medium")
+    with top_left:
+        with st.container(border=True):
+            st.markdown("**上一交易日宏观重点**")
+            for line in macro_brief_lines(macro):
+                st.write(f"- {line}")
+    with top_right:
+        with st.container(border=True):
+            st.markdown("**对组合操作的含义**")
+            for line in operation_notes(index_items, macro):
+                st.write(f"- {line}")
+
+    cal_left, cal_right = st.columns(2, gap="medium")
+    with cal_left:
+        st.markdown("#### This Week Macro Calendar")
+        macro_calendar = pd.DataFrame(weekly_macro_calendar())
+        if macro_calendar.empty:
+            st.info("-")
+        else:
+            st.dataframe(style_priority_table(macro_calendar), use_container_width=True, hide_index=True, height=min(420, 42 + 34 * len(macro_calendar)))
+    with cal_right:
+        st.markdown("#### Holding Date Alerts")
+        symbols = [p["symbol"] for p in portfolio.get("holdings", [])]
+        events = pd.DataFrame(portfolio_event_calendar(symbols))
+        if events.empty:
+            st.info("-")
+        else:
+            st.dataframe(events, use_container_width=True, hide_index=True, height=min(420, 42 + 34 * len(events)))
+
+    idx_df = pd.DataFrame(index_items)
+    st.markdown("#### Index Snapshot")
+    if idx_df.empty:
+        st.info("-")
+    else:
+        cols = ["name", "last", "day_return", "return_5d", "return_20d", "return_60d", "trend", "comment"]
+        existing = [col for col in cols if col in idx_df.columns]
+        view = idx_df[existing].rename(
+            columns={
+                "name": "Index",
+                "last": "Last",
+                "day_return": "Day",
+                "return_5d": "5D",
+                "return_20d": "20D",
+                "return_60d": "60D",
+                "trend": "Trend",
+                "comment": "Comment",
+            }
+        )
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+    st.markdown("#### 24h Macro Tape")
+    rows = pd.DataFrame(macro.get("items", []))
+    if rows.empty:
+        st.info("-")
+    else:
+        rows["Priority"] = rows.apply(lambda row: macro_priority(row.get("event"), row.get("impact") or row.get("importance")), axis=1)
+        cols = ["date", "country", "event", "Priority", "impact", "actual", "estimate", "previous", "category", "comment"]
+        existing = [col for col in cols if col in rows.columns]
+        view = rows[existing].rename(
+            columns={
+                "date": "Date",
+                "country": "Country",
+                "event": "Event",
+                "impact": "Impact",
+                "actual": "Actual",
+                "estimate": "Estimate",
+                "previous": "Previous",
+                "category": "Category",
+                "comment": "Comment",
+            }
+        )
+        st.dataframe(style_priority_table(view), use_container_width=True, hide_index=True)
 
 
 def render_admin(role: str, portfolio: dict[str, Any]) -> None:
@@ -1152,7 +1405,7 @@ def main() -> None:
     with tabs[2]:
         render_stock_detail(portfolio)
     with tabs[3]:
-        render_macro_indexes()
+        render_macro_indexes(portfolio)
     with tabs[4]:
         render_admin(role, portfolio)
 
