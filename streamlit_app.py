@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -1756,6 +1757,87 @@ def risk_band(score: float) -> str:
     return "Low"
 
 
+def percent_text(value: Any, digits: int = 1) -> str:
+    try:
+        num = float(value)
+    except Exception:
+        return "-"
+    return f"{num * 100:.{digits}f}%"
+
+
+def risk_bar_chart(data: pd.DataFrame, value_col: str, value_title: str) -> alt.Chart:
+    frame = data.copy()
+    frame["Label"] = frame[value_col].apply(lambda x: percent_text(x, 1))
+    base = alt.Chart(frame).encode(
+        y=alt.Y("Symbol:N", sort="-x", title=None, axis=alt.Axis(labelLimit=90)),
+        tooltip=[
+            alt.Tooltip("Symbol:N", title="Stock"),
+            alt.Tooltip(f"{value_col}:Q", title=value_title, format=".2%"),
+        ],
+    )
+    bars = base.mark_bar(cornerRadiusEnd=4, opacity=0.88).encode(
+        x=alt.X(f"{value_col}:Q", title=value_title, axis=alt.Axis(format="%")),
+        color=alt.Color("Symbol:N", legend=alt.Legend(title="Stock", orient="bottom", columns=6)),
+    )
+    labels = base.mark_text(align="left", dx=5, color="#334155", fontSize=11).encode(
+        x=alt.X(f"{value_col}:Q"),
+        text="Label:N",
+    )
+    return (bars + labels).properties(height=max(230, min(420, 28 * len(frame) + 48)))
+
+
+def risk_scatter_chart(scatter: pd.DataFrame) -> alt.Chart:
+    frame = scatter.copy()
+    frame["Weight Label"] = frame["Weight"].apply(lambda x: percent_text(x, 1))
+    frame["Vol Label"] = frame["Annual Vol"].apply(lambda x: percent_text(x, 1))
+    frame["Risk Contribution Label"] = frame["Risk Contribution"].apply(lambda x: percent_text(x, 1))
+    points = alt.Chart(frame).mark_circle(opacity=0.82, stroke="#ffffff", strokeWidth=1.2).encode(
+        x=alt.X("Weight:Q", title="Weight", axis=alt.Axis(format="%")),
+        y=alt.Y("Annual Vol:Q", title="Annual Vol", axis=alt.Axis(format="%")),
+        size=alt.Size("Risk Contribution:Q", title="Risk Contribution", scale=alt.Scale(range=[80, 850])),
+        color=alt.Color("Symbol:N", legend=alt.Legend(title="Stock", orient="bottom", columns=8)),
+        tooltip=[
+            alt.Tooltip("Symbol:N", title="Stock"),
+            alt.Tooltip("Weight:Q", title="Weight", format=".2%"),
+            alt.Tooltip("Annual Vol:Q", title="Annual Vol", format=".2%"),
+            alt.Tooltip("Beta:Q", title="Beta", format=".2f"),
+            alt.Tooltip("Risk Contribution:Q", title="Risk Contribution", format=".2%"),
+        ],
+    )
+    labels = alt.Chart(frame).mark_text(align="left", dx=8, dy=-6, fontSize=11, fontWeight="bold").encode(
+        x=alt.X("Weight:Q"),
+        y=alt.Y("Annual Vol:Q"),
+        text="Symbol:N",
+        color=alt.Color("Symbol:N", legend=None),
+    )
+    return (points + labels).properties(height=360)
+
+
+def correlation_heatmap(corr: pd.DataFrame) -> alt.Chart:
+    frame = corr.reset_index().melt(id_vars="index", var_name="Column", value_name="Correlation")
+    frame = frame.rename(columns={"index": "Row"})
+    heat = alt.Chart(frame).mark_rect(cornerRadius=2).encode(
+        x=alt.X("Column:N", title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("Row:N", title=None),
+        color=alt.Color(
+            "Correlation:Q",
+            title="Correlation",
+            scale=alt.Scale(domain=[-1, 0, 1], range=["#b91c1c", "#f8fafc", "#15803d"]),
+        ),
+        tooltip=[
+            alt.Tooltip("Row:N", title="Stock A"),
+            alt.Tooltip("Column:N", title="Stock B"),
+            alt.Tooltip("Correlation:Q", title="Correlation", format=".2f"),
+        ],
+    )
+    text = alt.Chart(frame).mark_text(fontSize=11, color="#0f172a").encode(
+        x=alt.X("Column:N"),
+        y=alt.Y("Row:N"),
+        text=alt.Text("Correlation:Q", format=".2f"),
+    )
+    return (heat + text).properties(height=max(320, min(620, 28 * len(corr) + 80)))
+
+
 def build_risk_assessment(portfolio: dict[str, Any]) -> dict[str, Any]:
     holdings = pd.DataFrame(portfolio.get("holdings", []))
     if holdings.empty:
@@ -1919,12 +2001,13 @@ def render_risk_assessment(portfolio: dict[str, Any]) -> None:
     chart_left, chart_right = st.columns(2, gap="medium")
     with chart_left:
         st.markdown("#### Position Weight")
-        alloc = holdings[["symbol", "weight"]].rename(columns={"symbol": "Symbol", "weight": "Weight"}).set_index("Symbol")
-        st.bar_chart(alloc, use_container_width=True, height=300)
+        alloc = holdings[["symbol", "weight"]].rename(columns={"symbol": "Symbol", "weight": "Weight"})
+        st.altair_chart(risk_bar_chart(alloc, "Weight", "Position Weight"), use_container_width=True)
     with chart_right:
         st.markdown("#### Risk Contribution")
-        rc = holdings[["symbol", "Risk Contribution"]].rename(columns={"symbol": "Symbol"}).set_index("Symbol")
-        st.bar_chart(rc, use_container_width=True, height=300)
+        rc = holdings[["symbol", "Risk Contribution"]].rename(columns={"symbol": "Symbol"})
+        rc["Risk Contribution"] = pd.to_numeric(rc["Risk Contribution"], errors="coerce").fillna(0)
+        st.altair_chart(risk_bar_chart(rc, "Risk Contribution", "Risk Contribution"), use_container_width=True)
 
     scatter = holdings[["symbol", "weight", "ann_vol", "beta_sp", "Risk Contribution"]].rename(
         columns={"symbol": "Symbol", "weight": "Weight", "ann_vol": "Annual Vol", "beta_sp": "Beta", "Risk Contribution": "Risk Contribution"}
@@ -1933,7 +2016,7 @@ def render_risk_assessment(portfolio: dict[str, Any]) -> None:
     scatter["Annual Vol"] = pd.to_numeric(scatter["Annual Vol"], errors="coerce").fillna(0)
     scatter["Beta"] = pd.to_numeric(scatter["Beta"], errors="coerce").fillna(1)
     st.markdown("#### Weight vs Volatility")
-    st.scatter_chart(scatter, x="Weight", y="Annual Vol", size="Risk Contribution", color="Beta", use_container_width=True, height=330)
+    st.altair_chart(risk_scatter_chart(scatter), use_container_width=True)
 
     detail = holdings[
         ["symbol", "market_value_usd", "weight", "ann_vol", "beta_sp", "corr_sp", "corr_nq", "Risk Contribution", "unrealized_pnl_usd"]
@@ -1982,7 +2065,7 @@ def render_risk_assessment(portfolio: dict[str, Any]) -> None:
     if len(risk["returns"].columns) > 1:
         st.markdown("#### Correlation Matrix")
         corr = risk["returns"].corr().round(2)
-        st.dataframe(corr.style.background_gradient(cmap="RdYlGn_r", vmin=-1, vmax=1).format("{:.2f}"), use_container_width=True)
+        st.altair_chart(correlation_heatmap(corr), use_container_width=True)
 
 
 def render_admin(role: str, portfolio: dict[str, Any]) -> None:
