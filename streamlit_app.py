@@ -627,6 +627,26 @@ def inject_styles() -> None:
           font-size: 12px;
           line-height: 1.4;
         }
+        .index-returns-table {
+          width: 100%;
+          border-collapse: collapse;
+          margin: 8px 0 8px;
+          table-layout: fixed;
+        }
+        .index-returns-table th {
+          color: #64748b;
+          font-size: 11px;
+          font-weight: 700;
+          text-align: left;
+          padding: 4px 4px 3px 0;
+          border-bottom: 1px solid #e5e7eb;
+        }
+        .index-returns-table td {
+          font-size: 13px;
+          font-weight: 700;
+          padding: 5px 4px 2px 0;
+          white-space: nowrap;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -816,42 +836,16 @@ def render_index_strip() -> None:
     if not items:
         st.info("Index data unavailable.")
         return
-    cols = st.columns(min(3, len(items)))
-    for col, item in zip(cols, items):
-        with col:
-            name = clean_text(item.get("name")) or "-"
-            symbol = clean_text(item.get("symbol")) or "-"
-            st.markdown(f"**{name}** `{symbol}`")
-            if item.get("available"):
-                st.metric(
-                    "Last / 1D",
-                    f"{to_float(item.get('last')):,.2f}",
-                    signed_text(item.get("day_return")),
-                )
-                c1, c2, c3 = st.columns(3)
-                c1.metric("5D", signed_text(item.get("return_5d")))
-                c2.metric("20D", signed_text(item.get("return_20d")))
-                c3.metric("60D", signed_text(item.get("return_60d")))
-                st.caption(f"{clean_text(item.get('trend')) or '-'}｜{clean_text(item.get('comment'))}")
-            else:
-                st.warning(clean_text(item.get("comment")) or "No data")
-
-
-def render_index_strip_html() -> None:
-    try:
-        data = core.index_overview()
-        items = data.get("items", [])
-    except Exception as exc:
-        st.warning(f"Index data unavailable: {exc}")
-        return
     cards = []
     for item in items:
+        name = clean_text(item.get("name")) or "-"
+        symbol = clean_text(item.get("symbol")) or "-"
         if not item.get("available"):
             cards.append(
                 f"""
                 <div class="index-card">
-                  <h4>{clean_text(item.get('name'))}<span>{clean_text(item.get('symbol'))}</span></h4>
-                  <p class="index-comment">{clean_text(item.get('comment')) or 'No data'}</p>
+                  <h4>{name}<span>{symbol}</span></h4>
+                  <p class="index-comment">{clean_text(item.get("comment")) or "No data"}</p>
                 </div>
                 """
             )
@@ -859,14 +853,17 @@ def render_index_strip_html() -> None:
         cards.append(
             f"""
             <div class="index-card">
-              <h4>{clean_text(item.get('name'))}<span>{clean_text(item.get('symbol'))}</span></h4>
-              <div class="index-price">{to_float(item.get('last')):,.2f} {signed_span(item.get('day_return'))}</div>
-              <div class="index-returns">
-                <span>5D {signed_span(item.get('return_5d'))}</span>
-                <span>20D {signed_span(item.get('return_20d'))}</span>
-                <span>60D {signed_span(item.get('return_60d'))}</span>
-              </div>
-              <div class="index-comment"><strong>{clean_text(item.get('trend')) or '-'}</strong> {clean_text(item.get('comment'))}</div>
+              <h4>{name}<span>{symbol}</span></h4>
+              <div class="index-price">{to_float(item.get("last")):,.2f} {signed_span(item.get("day_return"))}</div>
+              <table class="index-returns-table">
+                <thead><tr><th>5D</th><th>20D</th><th>60D</th></tr></thead>
+                <tbody><tr>
+                  <td>{signed_span(item.get("return_5d"))}</td>
+                  <td>{signed_span(item.get("return_20d"))}</td>
+                  <td>{signed_span(item.get("return_60d"))}</td>
+                </tr></tbody>
+              </table>
+              <div class="index-comment"><strong>{clean_text(item.get("trend")) or "-"}</strong>｜{clean_text(item.get("comment"))}</div>
             </div>
             """
         )
