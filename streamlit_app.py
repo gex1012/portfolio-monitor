@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 import importlib
 import json
 import os
@@ -474,6 +475,36 @@ def pct(value: Any) -> str:
     return f"{float(value) * 100:+.2f}%"
 
 
+def compact_number(value: Any, decimals: int = 2) -> str:
+    if value in (None, ""):
+        return "-"
+    try:
+        num = float(value)
+    except Exception:
+        text = clean_text(value)
+        return text or "-"
+    if pd.isna(num):
+        return "-"
+    text = f"{num:,.{decimals}f}"
+    return text.rstrip("0").rstrip(".")
+
+
+def compact_pct(value: Any) -> str:
+    if value in (None, ""):
+        return "-"
+    try:
+        num = float(value)
+    except Exception:
+        return clean_text(value) or "-"
+    if pd.isna(num):
+        return "-"
+    return f"{num * 100:+.2f}%"
+
+
+def safe_html(value: Any) -> str:
+    return html.escape(clean_text(value) or "-")
+
+
 def period_return_ytd(symbol: str) -> float | None:
     rows = core.historical_prices(symbol)
     year = dt.date.today().year
@@ -671,6 +702,51 @@ def inject_styles() -> None:
           font-weight: 700;
           padding: 5px 4px 2px 0;
           white-space: nowrap;
+        }
+        .macro-brief-card {
+          border: 1px solid #e5e7eb;
+          border-radius: 8px;
+          background: #ffffff;
+          padding: 16px 18px 14px;
+          min-height: 236px;
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.035);
+        }
+        .macro-brief-card h4 {
+          margin: 0 0 12px;
+          color: #172033;
+          font-size: 17px;
+          line-height: 1.25;
+          font-weight: 750;
+        }
+        .macro-brief-card ul {
+          margin: 0;
+          padding: 0;
+          list-style: none;
+        }
+        .macro-brief-card li {
+          position: relative;
+          margin: 0 0 12px;
+          padding-left: 18px;
+          color: #253247;
+          font-size: 14.5px;
+          line-height: 1.75;
+        }
+        .macro-brief-card li::before {
+          content: "";
+          position: absolute;
+          left: 0;
+          top: 0.78em;
+          width: 5px;
+          height: 5px;
+          border-radius: 999px;
+          background: #2563eb;
+        }
+        .macro-brief-card strong {
+          color: #0f172a;
+          font-weight: 750;
+        }
+        div[data-testid="stDataFrame"] {
+          font-size: 13px;
         }
         </style>
         """,
@@ -923,6 +999,7 @@ def render_overview(portfolio: dict[str, Any]) -> None:
     )
     st.subheader("Index Tape")
     render_index_strip()
+    render_holding_date_alerts(portfolio)
 
     holdings = pd.DataFrame(portfolio["holdings"])
     if holdings.empty:
@@ -1373,6 +1450,204 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
             }
         )
         st.dataframe(style_priority_table(view), use_container_width=True, hide_index=True)
+
+
+def macro_cell(value: Any) -> str:
+    text = clean_text(value)
+    if not text:
+        return "-"
+    try:
+        float(text.replace(",", ""))
+    except Exception:
+        return text
+    return compact_number(text)
+
+
+def render_macro_card(title: str, lines: list[str]) -> None:
+    bullets = "".join(f"<li>{safe_html(line)}</li>" for line in lines if clean_text(line)) or "<li>-</li>"
+    st.markdown(
+        f"""
+<div class="macro-brief-card">
+  <h4>{safe_html(title)}</h4>
+  <ul>{bullets}</ul>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def operation_notes(index_items: list[dict[str, Any]], macro: dict[str, Any]) -> list[str]:
+    weak_indexes = [
+        clean_text(item.get("name"))
+        for item in index_items
+        if to_float(item.get("return_20d")) < 0 and clean_text(item.get("name"))
+    ]
+    hot_macro = [
+        item
+        for item in macro.get("items", [])
+        if macro_priority(item.get("event"), item.get("impact") or item.get("importance")) == "Hot"
+    ]
+    notes: list[str] = []
+    if weak_indexes:
+        notes.append(f"指数短期仍偏谨慎：{', '.join(weak_indexes[:3])} 20D 回报为负，追高要更挑相对强势标的。")
+    else:
+        notes.append("指数短期没有明显系统性破坏，持仓可以继续按个股强弱和事件节奏管理。")
+    if hot_macro:
+        notes.append("本周和过去 24h 有通胀、就业或 Fed 类关键数据，建议控制高 beta 仓位的隔夜波动风险。")
+    notes.append("操作上优先保留 YTD 相对 NQ/SP 仍强的持仓；相对强弱转负且跌破关键均线的名字，先降低仓位或等待确认。")
+    return notes
+
+
+def render_holding_date_alerts(portfolio: dict[str, Any]) -> None:
+    st.subheader("Holding Date Alerts")
+    symbols = [p["symbol"] for p in portfolio.get("holdings", [])]
+    events = pd.DataFrame(portfolio_event_calendar(symbols))
+    if events.empty:
+        st.info("-")
+        return
+    st.dataframe(
+        events,
+        use_container_width=True,
+        hide_index=True,
+        height=min(260, 42 + 34 * len(events)),
+        column_config={
+            "Date": st.column_config.TextColumn("Date", width="small"),
+            "Symbol": st.column_config.TextColumn("Symbol", width="small"),
+            "Type": st.column_config.TextColumn("Type", width="small"),
+            "Detail": st.column_config.TextColumn("Detail", width="large"),
+        },
+    )
+
+
+def render_macro_indexes(portfolio: dict[str, Any]) -> None:
+    st.subheader("Macro Brief")
+    try:
+        macro = core.macro_updates()
+    except Exception as exc:
+        st.error(str(exc))
+        macro = {"analysis": [], "items": []}
+    try:
+        idx = core.index_overview()
+        index_items = idx.get("items", [])
+    except Exception as exc:
+        st.error(str(exc))
+        index_items = []
+
+    top_left, top_right = st.columns([1.15, 0.85], gap="medium")
+    with top_left:
+        render_macro_card("上一交易日宏观重点", macro_brief_lines(macro))
+    with top_right:
+        render_macro_card("对组合操作的含义", operation_notes(index_items, macro))
+
+    cal_left, cal_right = st.columns(2, gap="medium")
+    with cal_left:
+        st.markdown("#### This Week Macro Calendar")
+        macro_calendar = pd.DataFrame(weekly_macro_calendar())
+        if macro_calendar.empty:
+            st.info("-")
+        else:
+            for col in ["Estimate", "Previous"]:
+                if col in macro_calendar.columns:
+                    macro_calendar[col] = macro_calendar[col].apply(macro_cell)
+            st.dataframe(
+                style_priority_table(macro_calendar),
+                use_container_width=True,
+                hide_index=True,
+                height=min(420, 42 + 34 * len(macro_calendar)),
+                column_config={
+                    "Date": st.column_config.TextColumn("Date", width="small"),
+                    "Country": st.column_config.TextColumn("Country", width="small"),
+                    "Event": st.column_config.TextColumn("Event", width="large"),
+                    "Priority": st.column_config.TextColumn("Priority", width="small"),
+                    "Impact": st.column_config.TextColumn("Impact", width="small"),
+                    "Estimate": st.column_config.TextColumn("Estimate", width="small"),
+                    "Previous": st.column_config.TextColumn("Previous", width="small"),
+                },
+            )
+    with cal_right:
+        render_holding_date_alerts(portfolio)
+
+    idx_df = pd.DataFrame(index_items)
+    st.markdown("#### Index Snapshot")
+    if idx_df.empty:
+        st.info("-")
+    else:
+        cols = ["name", "last", "day_return", "return_5d", "return_20d", "return_60d", "trend", "comment"]
+        existing = [col for col in cols if col in idx_df.columns]
+        view = idx_df[existing].rename(
+            columns={
+                "name": "Index",
+                "last": "Last",
+                "day_return": "Day",
+                "return_5d": "5D",
+                "return_20d": "20D",
+                "return_60d": "60D",
+                "trend": "Trend",
+                "comment": "Comment",
+            }
+        )
+        for col in ["Day", "5D", "20D", "60D"]:
+            if col in view.columns:
+                view[col] = view[col].apply(compact_pct)
+        if "Last" in view.columns:
+            view["Last"] = view["Last"].apply(lambda x: compact_number(x, 2))
+        st.dataframe(
+            view,
+            use_container_width=True,
+            hide_index=True,
+            height=150,
+            column_config={
+                "Index": st.column_config.TextColumn("Index", width="small"),
+                "Last": st.column_config.TextColumn("Last", width="small"),
+                "Day": st.column_config.TextColumn("Day", width="small"),
+                "5D": st.column_config.TextColumn("5D", width="small"),
+                "20D": st.column_config.TextColumn("20D", width="small"),
+                "60D": st.column_config.TextColumn("60D", width="small"),
+                "Trend": st.column_config.TextColumn("Trend", width="small"),
+                "Comment": st.column_config.TextColumn("Comment", width="large"),
+            },
+        )
+
+    st.markdown("#### 24h Macro Tape")
+    rows = pd.DataFrame(macro.get("items", []))
+    if rows.empty:
+        st.info("-")
+    else:
+        rows["Priority"] = rows.apply(lambda row: macro_priority(row.get("event"), row.get("impact") or row.get("importance")), axis=1)
+        cols = ["date", "country", "event", "Priority", "actual", "estimate", "previous", "category", "comment"]
+        existing = [col for col in cols if col in rows.columns]
+        view = rows[existing].rename(
+            columns={
+                "date": "Date",
+                "country": "Country",
+                "event": "Event",
+                "actual": "Actual",
+                "estimate": "Estimate",
+                "previous": "Previous",
+                "category": "Category",
+                "comment": "Comment",
+            }
+        )
+        for col in ["Actual", "Estimate", "Previous"]:
+            if col in view.columns:
+                view[col] = view[col].apply(macro_cell)
+        st.dataframe(
+            style_priority_table(view),
+            use_container_width=True,
+            hide_index=True,
+            height=min(520, 42 + 34 * len(view)),
+            column_config={
+                "Date": st.column_config.TextColumn("Date", width="small"),
+                "Country": st.column_config.TextColumn("Country", width="small"),
+                "Event": st.column_config.TextColumn("Event", width="medium"),
+                "Priority": st.column_config.TextColumn("Priority", width="small"),
+                "Actual": st.column_config.TextColumn("Actual", width="small"),
+                "Estimate": st.column_config.TextColumn("Estimate", width="small"),
+                "Previous": st.column_config.TextColumn("Previous", width="small"),
+                "Category": st.column_config.TextColumn("Category", width="small"),
+                "Comment": st.column_config.TextColumn("Comment", width="large"),
+            },
+        )
 
 
 def render_admin(role: str, portfolio: dict[str, Any]) -> None:
