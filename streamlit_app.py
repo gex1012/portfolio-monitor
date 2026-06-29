@@ -808,16 +808,6 @@ def render_options_html(options: dict[str, Any]) -> str:
     return "".join(html)
 
 
-def signed_span(value: Any, percent: bool = True) -> str:
-    try:
-        num = float(value)
-    except Exception:
-        return '<span style="color:#64748b;">-</span>'
-    color = "#15803d" if num >= 0 else "#b91c1c"
-    text = f"{num * 100:+.2f}%" if percent else f"{num:+,.2f}"
-    return f'<span style="color:{color};font-weight:700;">{text}</span>'
-
-
 def signed_text(value: Any, percent: bool = True) -> str:
     try:
         num = float(value)
@@ -836,38 +826,28 @@ def render_index_strip() -> None:
     if not items:
         st.info("Index data unavailable.")
         return
-    cards = []
-    for item in items:
-        name = clean_text(item.get("name")) or "-"
-        symbol = clean_text(item.get("symbol")) or "-"
-        if not item.get("available"):
-            cards.append(
-                f"""
-                <div class="index-card">
-                  <h4>{name}<span>{symbol}</span></h4>
-                  <p class="index-comment">{clean_text(item.get("comment")) or "No data"}</p>
-                </div>
-                """
-            )
-            continue
-        cards.append(
-            f"""
-            <div class="index-card">
-              <h4>{name}<span>{symbol}</span></h4>
-              <div class="index-price">{to_float(item.get("last")):,.2f} {signed_span(item.get("day_return"))}</div>
-              <table class="index-returns-table">
-                <thead><tr><th>5D</th><th>20D</th><th>60D</th></tr></thead>
-                <tbody><tr>
-                  <td>{signed_span(item.get("return_5d"))}</td>
-                  <td>{signed_span(item.get("return_20d"))}</td>
-                  <td>{signed_span(item.get("return_60d"))}</td>
-                </tr></tbody>
-              </table>
-              <div class="index-comment"><strong>{clean_text(item.get("trend")) or "-"}</strong>｜{clean_text(item.get("comment"))}</div>
-            </div>
-            """
-        )
-    st.markdown('<div class="index-strip">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+    cols = st.columns(min(3, len(items)), gap="medium")
+    for col, item in zip(cols, items):
+        with col:
+            with st.container(border=True):
+                name = clean_text(item.get("name")) or "-"
+                symbol = clean_text(item.get("symbol")) or "-"
+                st.markdown(f"**{name}** `{symbol}`")
+                if not item.get("available"):
+                    st.warning(clean_text(item.get("comment")) or "No data")
+                    continue
+                st.metric("Last / 1D", f"{to_float(item.get('last')):,.2f}", signed_text(item.get("day_return")))
+                ret_df = pd.DataFrame(
+                    [
+                        {
+                            "5D": signed_text(item.get("return_5d")),
+                            "20D": signed_text(item.get("return_20d")),
+                            "60D": signed_text(item.get("return_60d")),
+                        }
+                    ]
+                )
+                st.dataframe(ret_df, use_container_width=True, hide_index=True, height=70)
+                st.caption(f"{clean_text(item.get('trend')) or '-'} | {clean_text(item.get('comment'))}")
 
 
 def login_gate() -> tuple[str, str]:
