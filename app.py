@@ -996,6 +996,16 @@ def parse_occ_option(option_symbol: str) -> dict[str, Any] | None:
     return {"root": root, "expiration": expiry, "type": "call" if side == "C" else "put", "strike": int(strike_raw) / 1000}
 
 
+def option_is_live(expiration: Any, today: dt.date | None = None) -> bool:
+    if not expiration:
+        return False
+    try:
+        expiry_date = dt.date.fromisoformat(str(expiration)[:10])
+    except Exception:
+        return False
+    return expiry_date >= (today or dt.date.today())
+
+
 def cboe_options(symbol: str) -> tuple[list[dict[str, Any]], str | None, str | None]:
     sym = clean_symbol(symbol).replace(".US", "")
     if not re.fullmatch(r"[A-Z.]{1,8}", sym):
@@ -1034,10 +1044,12 @@ def cboe_options(symbol: str) -> tuple[list[dict[str, Any]], str | None, str | N
 def options_distribution(symbol: str) -> dict[str, Any]:
     sym = fmp_symbol(symbol)
     rows, timestamp, error = cboe_options(sym)
+    today = dt.date.today()
+    live_rows = [row for row in rows if option_is_live(row.get("expiration"), today)]
     calls: dict[float, float] = defaultdict(float)
     puts: dict[float, float] = defaultdict(float)
     expirations: set[str] = set()
-    for item in rows:
+    for item in live_rows:
         strike = to_number(item.get("strike"))
         if strike <= 0:
             continue
@@ -1051,13 +1063,13 @@ def options_distribution(symbol: str) -> dict[str, Any]:
         elif "call" in option_type:
             calls[strike] += oi
     nearest_expiry = sorted(expirations)[0] if expirations else None
-    nearest_rows = [r for r in rows if r.get("expiration") == nearest_expiry] if nearest_expiry else []
+    nearest_rows = [r for r in live_rows if r.get("expiration") == nearest_expiry] if nearest_expiry else []
     call_rows = [r for r in nearest_rows if r.get("type") == "call"]
     put_rows = [r for r in nearest_rows if r.get("type") == "put"]
     max_call = max(call_rows, key=lambda r: r.get("open_interest", 0), default=None)
     max_put = max(put_rows, key=lambda r: r.get("open_interest", 0), default=None)
-    total_call_oi = sum(r.get("open_interest", 0) for r in rows if r.get("type") == "call")
-    total_put_oi = sum(r.get("open_interest", 0) for r in rows if r.get("type") == "put")
+    total_call_oi = sum(r.get("open_interest", 0) for r in live_rows if r.get("type") == "call")
+    total_put_oi = sum(r.get("open_interest", 0) for r in live_rows if r.get("type") == "put")
     top = sorted(
         [{"strike": s, "call_oi": calls.get(s, 0), "put_oi": puts.get(s, 0)} for s in set(calls) | set(puts)],
         key=lambda x: x["call_oi"] + x["put_oi"],
