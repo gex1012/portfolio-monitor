@@ -837,23 +837,27 @@ def render_overview(portfolio: dict[str, Any]) -> None:
             "rs_vs_sp_20d": "RS vs SP",
         }
     )
+    styled = view.style.format(
+        {
+            "Qty": "{:,.0f}",
+            "Avg Cost": "{:,.2f}",
+            "Last": "{:,.2f}",
+            "Market Value": "${:,.0f}",
+            "Unrealized": "${:,.0f}",
+            "PnL %": "{:+.2%}",
+            "Day": "{:+.2f}%",
+            "RS vs NQ": "{:+.2%}",
+            "RS vs SP": "{:+.2%}",
+        },
+        na_rep="-",
+    )
+    signed_cols = ["Unrealized", "PnL %", "Day", "RS vs NQ", "RS vs SP"]
+    if hasattr(styled, "map"):
+        styled = styled.map(color_signed, subset=signed_cols)
+    else:
+        styled = styled.applymap(color_signed, subset=signed_cols)
     styled = (
-        view.style.format(
-            {
-                "Qty": "{:,.0f}",
-                "Avg Cost": "{:,.2f}",
-                "Last": "{:,.2f}",
-                "Market Value": "${:,.0f}",
-                "Unrealized": "${:,.0f}",
-                "PnL %": "{:+.2%}",
-                "Day": "{:+.2f}%",
-                "RS vs NQ": "{:+.2%}",
-                "RS vs SP": "{:+.2%}",
-            },
-            na_rep="-",
-        )
-        .applymap(color_signed, subset=["Unrealized", "PnL %", "Day", "RS vs NQ", "RS vs SP"])
-        .set_properties(subset=["Symbol"], **{"font-weight": "700", "color": "#1d4ed8"})
+        styled.set_properties(subset=["Symbol"], **{"font-weight": "700", "color": "#1d4ed8"})
         .set_table_styles(
             [
                 {"selector": "th", "props": [("background-color", "#f8fafc"), ("color", "#475569"), ("font-weight", "700")]},
