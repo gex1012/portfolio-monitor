@@ -792,12 +792,15 @@ def render_candlestick_chart(rows: list[dict[str, Any]]) -> None:
         return
     chart_data = json.dumps(data, ensure_ascii=False, default=str)
     html = """
-    <div style="border:1px solid #e5e7eb;border-radius:8px;background:#fff;overflow:hidden;">
+    <div id="klineWrap" style="position:relative;border:1px solid #e5e7eb;border-radius:8px;background:#fff;overflow:hidden;">
       <canvas id="klineCanvas" width="980" height="390" style="width:100%;height:390px;display:block;"></canvas>
+      <div id="klineTip" style="display:none;position:absolute;z-index:5;min-width:188px;padding:9px 10px;border:1px solid #dbe3ee;border-radius:8px;background:rgba(255,255,255,0.96);box-shadow:0 8px 24px rgba(15,23,42,0.14);font:12px Arial;color:#172033;pointer-events:none;line-height:1.45;"></div>
     </div>
     <script>
     const rows = __DATA__;
+    const wrap = document.getElementById("klineWrap");
     const canvas = document.getElementById("klineCanvas");
+    const tip = document.getElementById("klineTip");
     const ctx = canvas.getContext("2d");
     const w = canvas.width;
     const h = canvas.height;
@@ -883,6 +886,52 @@ def render_candlestick_chart(rows: list[dict[str, Any]]) -> None:
       ctx.fillRect(lx, legendY - 8, 18, 3);
       ctx.fillStyle = "#64748b";
       ctx.fillText(item[0], lx + 24, legendY - 4);
+    });
+
+    function fmt(v, digits = 2) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "-";
+      return n.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+    }
+    function fmtVol(v) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "-";
+      if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+      if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+      if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+      return n.toLocaleString();
+    }
+    canvas.addEventListener("mousemove", event => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = (event.clientX - rect.left) * (w / rect.width);
+      const my = (event.clientY - rect.top) * (h / rect.height);
+      if (mx < pad.l || mx > w - pad.r || my < pad.t || my > h - pad.b || rows.length === 0) {
+        tip.style.display = "none";
+        return;
+      }
+      const idx = Math.max(0, Math.min(rows.length - 1, Math.round((mx - pad.l) / Math.max(1, w - pad.l - pad.r) * (rows.length - 1))));
+      const r = rows[idx] || {};
+      const up = Number(r.close) >= Number(r.open);
+      tip.innerHTML = `
+        <div style="font-weight:700;margin-bottom:4px;">${r.date || "-"}</div>
+        <div>Open <strong>${fmt(r.open)}</strong> &nbsp; High <strong>${fmt(r.high)}</strong></div>
+        <div>Low <strong>${fmt(r.low)}</strong> &nbsp; Close <strong style="color:${up ? "#15803d" : "#b91c1c"}">${fmt(r.close)}</strong></div>
+        <div>Volume <strong>${fmtVol(r.volume)}</strong></div>
+        <div style="color:#64748b;">MA20 ${fmt(r.sma20)} / MA50 ${fmt(r.sma50)}</div>
+      `;
+      tip.style.display = "block";
+      const wrapRect = wrap.getBoundingClientRect();
+      const tipWidth = tip.offsetWidth || 188;
+      const tipHeight = tip.offsetHeight || 92;
+      let left = event.clientX - wrapRect.left + 14;
+      let top = event.clientY - wrapRect.top + 14;
+      if (left + tipWidth > wrapRect.width - 8) left = event.clientX - wrapRect.left - tipWidth - 14;
+      if (top + tipHeight > wrapRect.height - 8) top = event.clientY - wrapRect.top - tipHeight - 14;
+      tip.style.left = `${Math.max(8, left)}px`;
+      tip.style.top = `${Math.max(8, top)}px`;
+    });
+    canvas.addEventListener("mouseleave", () => {
+      tip.style.display = "none";
     });
     </script>
     """.replace("__DATA__", chart_data)
