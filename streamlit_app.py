@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 ROOT = Path(__file__).resolve().parent
@@ -523,6 +524,64 @@ def inject_styles() -> None:
           font-size: 13px;
           margin-bottom: 8px;
         }
+        .detail-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+          gap: 14px;
+          align-items: start;
+          margin-top: 10px;
+        }
+        .panel-card {
+          border: 1px solid #e5e7eb;
+          border-radius: 8px;
+          background: #ffffff;
+          padding: 12px 14px;
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+          margin-bottom: 12px;
+        }
+        .panel-card h4 {
+          margin: 0 0 8px;
+          color: #172033;
+          font-size: 15px;
+        }
+        .panel-card p,
+        .panel-card li {
+          color: #334155;
+          line-height: 1.45;
+          font-size: 13px;
+        }
+        .panel-card ul {
+          margin: 0;
+          padding-left: 18px;
+        }
+        .mini-bar-row {
+          display: grid;
+          grid-template-columns: 72px minmax(0, 1fr) 82px;
+          gap: 8px;
+          align-items: center;
+          margin: 6px 0;
+          color: #475569;
+          font-size: 12px;
+        }
+        .mini-track {
+          height: 9px;
+          border-radius: 999px;
+          background: #eef2f7;
+          overflow: hidden;
+        }
+        .mini-fill {
+          height: 100%;
+          border-radius: 999px;
+          background: #176b87;
+        }
+        .mini-fill.put {
+          background: #a66a00;
+        }
+        .news-link {
+          color: #176b87;
+          text-decoration: none;
+          font-weight: 600;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -539,6 +598,149 @@ def color_signed(value: Any) -> str:
     if num < 0:
         return "color: #b91c1c; font-weight: 600"
     return "color: #475569"
+
+
+def render_candlestick_chart(rows: list[dict[str, Any]]) -> None:
+    data = rows[-170:]
+    if not data:
+        st.info("No price history.")
+        return
+    chart_data = json.dumps(data, ensure_ascii=False, default=str)
+    html = """
+    <div style="border:1px solid #e5e7eb;border-radius:8px;background:#fff;overflow:hidden;">
+      <canvas id="klineCanvas" width="980" height="390" style="width:100%;height:390px;display:block;"></canvas>
+    </div>
+    <script>
+    const rows = __DATA__;
+    const canvas = document.getElementById("klineCanvas");
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width;
+    const h = canvas.height;
+    const pad = { l: 54, r: 22, t: 28, b: 42 };
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+
+    const vals = [];
+    rows.forEach(r => {
+      ["high", "low", "sma20", "sma50"].forEach(k => {
+        const v = Number(r[k]);
+        if (Number.isFinite(v) && v > 0) vals.push(v);
+      });
+    });
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    const x = i => pad.l + (i / Math.max(1, rows.length - 1)) * (w - pad.l - pad.r);
+    const y = v => pad.t + (max - v) / Math.max(0.0001, max - min) * (h - pad.t - pad.b);
+
+    ctx.strokeStyle = "#e5e7eb";
+    ctx.lineWidth = 1;
+    ctx.font = "12px Arial";
+    ctx.fillStyle = "#64748b";
+    for (let i = 0; i < 5; i++) {
+      const yy = pad.t + i * (h - pad.t - pad.b) / 4;
+      const price = max - i * (max - min) / 4;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, yy);
+      ctx.lineTo(w - pad.r, yy);
+      ctx.stroke();
+      ctx.fillText(price.toFixed(2), 8, yy + 4);
+    }
+
+    rows.forEach((r, i) => {
+      const xx = x(i);
+      const open = Number(r.open), close = Number(r.close), high = Number(r.high), low = Number(r.low);
+      if (![open, close, high, low].every(Number.isFinite)) return;
+      const up = close >= open;
+      const color = up ? "#2f8f6f" : "#b64242";
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(xx, y(low));
+      ctx.lineTo(xx, y(high));
+      ctx.stroke();
+      const top = y(Math.max(open, close));
+      const bot = y(Math.min(open, close));
+      ctx.fillRect(xx - 2.4, top, 4.8, Math.max(1, bot - top));
+    });
+
+    function drawLine(key, color) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      let started = false;
+      rows.forEach((r, i) => {
+        const v = Number(r[key]);
+        if (!Number.isFinite(v) || v <= 0) return;
+        if (!started) {
+          ctx.moveTo(x(i), y(v));
+          started = true;
+        } else {
+          ctx.lineTo(x(i), y(v));
+        }
+      });
+      if (started) ctx.stroke();
+    }
+
+    drawLine("sma20", "#176b87");
+    drawLine("sma50", "#a66a00");
+
+    const first = rows[0]?.date || "";
+    const last = rows[rows.length - 1]?.date || "";
+    ctx.fillStyle = "#64748b";
+    ctx.fillText(`${first} to ${last}`, pad.l, h - 16);
+    ctx.fillText(`High ${max.toFixed(2)} / Low ${min.toFixed(2)}`, pad.l, 18);
+
+    const legendY = h - 16;
+    [["K", "#2f8f6f"], ["MA20", "#176b87"], ["MA50", "#a66a00"]].forEach((item, idx) => {
+      const lx = w - 210 + idx * 66;
+      ctx.fillStyle = item[1];
+      ctx.fillRect(lx, legendY - 8, 18, 3);
+      ctx.fillStyle = "#64748b";
+      ctx.fillText(item[0], lx + 24, legendY - 4);
+    });
+    </script>
+    """.replace("__DATA__", chart_data)
+    components.html(html, height=410)
+
+
+def render_volume_profile_html(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "<p>暂无筹码/成交密集区数据。</p>"
+    max_vol = max([to_float(r.get("volume")) for r in rows] + [1])
+    out = []
+    for row in rows[:12]:
+        price = to_float(row.get("price"))
+        vol = to_float(row.get("volume"))
+        width = min(100, max(1, vol / max_vol * 100))
+        out.append(
+            f'<div class="mini-bar-row"><span>{price:,.2f}</span><div class="mini-track"><div class="mini-fill" style="width:{width:.1f}%"></div></div><span>{vol:,.0f}</span></div>'
+        )
+    return "".join(out)
+
+
+def render_options_html(options: dict[str, Any]) -> str:
+    if not options.get("available"):
+        return f"<p>{clean_text(options.get('note')) or 'No options data.'}</p>"
+    summary = options.get("summary", {})
+    rows = list(options.get("distribution", []))
+    rows.sort(key=lambda r: to_float(r.get("call_oi")) + to_float(r.get("put_oi")), reverse=True)
+    max_oi = max([max(to_float(r.get("call_oi")), to_float(r.get("put_oi"))) for r in rows] + [1])
+    html = [
+        f"<p><strong>Put/Call OI:</strong> {to_float(summary.get('put_call_oi_ratio')):.2f} &nbsp; <strong>Call/Put OI:</strong> {to_float(summary.get('call_put_oi_ratio')):.2f}</p>",
+        f"<p><strong>最近到期:</strong> {summary.get('nearest_expiry') or '-'} / 最大 Call OI strike {summary.get('nearest_max_call_oi_strike') or '-'} / 最大 Put OI strike {summary.get('nearest_max_put_oi_strike') or '-'}</p>",
+    ]
+    for row in rows[:10]:
+        strike = to_float(row.get("strike"))
+        call_oi = to_float(row.get("call_oi"))
+        put_oi = to_float(row.get("put_oi"))
+        cw = min(100, max(1, call_oi / max_oi * 100))
+        pw = min(100, max(1, put_oi / max_oi * 100))
+        html.append(
+            f'<div class="mini-bar-row"><span>{strike:,.2f}</span><div class="mini-track"><div class="mini-fill" style="width:{cw:.1f}%"></div></div><span>C {call_oi:,.0f}</span></div>'
+            f'<div class="mini-bar-row"><span></span><div class="mini-track"><div class="mini-fill put" style="width:{pw:.1f}%"></div></div><span>P {put_oi:,.0f}</span></div>'
+        )
+    return "".join(html)
 
 
 def login_gate() -> tuple[str, str]:
@@ -723,17 +925,64 @@ def render_stock_detail(portfolio: dict[str, Any]) -> None:
     with st.spinner("Loading stock detail..."):
         detail = core.stock_detail(symbol)
     tech = detail.get("technical", {})
-    hist = pd.DataFrame(tech.get("history", []))
-    if not hist.empty:
-        st.line_chart(hist.set_index("date")[["close", "sma20", "sma50"]], use_container_width=True)
     advice = tech.get("advice", {})
-    st.markdown("**短期：** " + str(advice.get("short_term", "-")))
-    st.markdown("**中期：** " + str(advice.get("medium_term", "-")))
-    st.write("技术信息")
-    st.write(tech.get("signals", [])[:10])
-    opt = detail.get("options", {})
-    st.write("Options")
-    st.json(opt.get("summary", {}), expanded=False)
+    signals = tech.get("signals", [])[:10]
+    col_chart, col_side = st.columns([1.35, 0.65], gap="medium")
+    with col_chart:
+        render_candlestick_chart(tech.get("history", []))
+    with col_side:
+        st.markdown(
+            f"""
+            <div class="panel-card">
+              <h4>技术点位与操作建议</h4>
+              <p><strong>短期：</strong>{clean_text(advice.get("short_term")) or '-'}</p>
+              <p><strong>中期：</strong>{clean_text(advice.get("medium_term")) or '-'}</p>
+            </div>
+            <div class="panel-card">
+              <h4>关键技术信息</h4>
+              <ul>{''.join(f'<li>{clean_text(x)}</li>' for x in signals) or '<li>-</li>'}</ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    left, right = st.columns(2, gap="medium")
+    with left:
+        st.markdown(
+            f"""
+            <div class="panel-card">
+              <h4>筹码 / 成交密集区</h4>
+              {render_volume_profile_html(tech.get("levels", {}).get("volume_profile", []))}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with right:
+        st.markdown(
+            f"""
+            <div class="panel-card">
+              <h4>期权 OI 分布</h4>
+              {render_options_html(detail.get("options", {}))}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    news = detail.get("news", {})
+    sentiment = news.get("sentiment", {})
+    items = news.get("items", [])[:10]
+    st.markdown(
+        f"""
+        <div class="panel-card">
+          <h4>过去24小时新闻与热度</h4>
+          <p><strong>Heat:</strong> {sentiment.get('heat', 0)}/100 &nbsp; <strong>Tone:</strong> {clean_text(sentiment.get('comment')) or 'neutral'}</p>
+          <ul>
+            {''.join(f'<li><a class="news-link" href="{clean_text(n.get("url"))}" target="_blank">{clean_text(n.get("title")) or "Untitled"}</a><br><span style="color:#64748b;font-size:12px;">{clean_text(n.get("site"))} / {clean_text(n.get("publishedDate"))}</span></li>' for n in items) or '<li>过去24小时没有返回相关新闻。</li>'}
+          </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_macro_indexes() -> None:
