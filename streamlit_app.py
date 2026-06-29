@@ -1768,8 +1768,9 @@ def percent_text(value: Any, digits: int = 1) -> str:
 def risk_bar_chart(data: pd.DataFrame, value_col: str, value_title: str) -> alt.Chart:
     frame = data.copy()
     frame["Label"] = frame[value_col].apply(lambda x: percent_text(x, 1))
+    chart_height = max(360, min(680, 42 * len(frame) + 80))
     base = alt.Chart(frame).encode(
-        y=alt.Y("Symbol:N", sort="-x", title=None, axis=alt.Axis(labelLimit=90)),
+        y=alt.Y("Symbol:N", sort="-x", title=None, axis=alt.Axis(labelLimit=140, labelPadding=8)),
         tooltip=[
             alt.Tooltip("Symbol:N", title="Stock"),
             alt.Tooltip(f"{value_col}:Q", title=value_title, format=".2%"),
@@ -1783,7 +1784,7 @@ def risk_bar_chart(data: pd.DataFrame, value_col: str, value_title: str) -> alt.
         x=alt.X(f"{value_col}:Q"),
         text="Label:N",
     )
-    return (bars + labels).properties(height=max(230, min(420, 28 * len(frame) + 48)))
+    return (bars + labels).properties(height=chart_height)
 
 
 def risk_scatter_chart(scatter: pd.DataFrame) -> alt.Chart:
@@ -1810,15 +1811,16 @@ def risk_scatter_chart(scatter: pd.DataFrame) -> alt.Chart:
         text="Symbol:N",
         color=alt.Color("Symbol:N", legend=None),
     )
-    return (points + labels).properties(height=360)
+    return (points + labels).properties(height=500)
 
 
 def correlation_heatmap(corr: pd.DataFrame) -> alt.Chart:
     frame = corr.reset_index().melt(id_vars="index", var_name="Column", value_name="Correlation")
     frame = frame.rename(columns={"index": "Row"})
+    chart_height = max(520, min(900, 42 * len(corr) + 120))
     heat = alt.Chart(frame).mark_rect(cornerRadius=2).encode(
-        x=alt.X("Column:N", title=None, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("Row:N", title=None),
+        x=alt.X("Column:N", title=None, axis=alt.Axis(labelAngle=0, labelLimit=120, labelPadding=8)),
+        y=alt.Y("Row:N", title=None, axis=alt.Axis(labelLimit=140, labelPadding=8)),
         color=alt.Color(
             "Correlation:Q",
             title="Correlation",
@@ -1835,7 +1837,7 @@ def correlation_heatmap(corr: pd.DataFrame) -> alt.Chart:
         y=alt.Y("Row:N"),
         text=alt.Text("Correlation:Q", format=".2f"),
     )
-    return (heat + text).properties(height=max(320, min(620, 28 * len(corr) + 80)))
+    return (heat + text).properties(height=chart_height)
 
 
 def build_risk_assessment(portfolio: dict[str, Any]) -> dict[str, Any]:
