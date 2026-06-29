@@ -1717,7 +1717,272 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
                 "Category": st.column_config.TextColumn("Category", width="small"),
                 "Comment": st.column_config.TextColumn("Comment", width="large"),
             },
-        )
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def risk_history(symbols: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
+    return {symbol: core.historical_prices(symbol) for symbol in symbols}
+
+
+def returns_from_history(rows: list[dict[str, Any]], suffix: str) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=["date", suffix])
+    frame = pd.DataFrame(rows)
+    if "date" not in frame.columns or "close" not in frame.columns:
+        return pd.DataFrame(columns=["date", suffix])
+    frame = frame[["date", "close"]].copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    frame = frame.dropna().sort_values("date")
+    frame[suffix] = frame["close"].pct_change()
+    return frame[["date", suffix]].dropna()
+
+
+def max_drawdown(series: pd.Series) -> float:
+    if series.empty:
+        return 0.0
+    wealth = (1 + series.fillna(0)).cumprod()
+    peak = wealth.cummax()
+    drawdown = wealth / peak - 1
+    return float(drawdown.min()) if not drawdown.empty else 0.0
+
+
+def risk_band(score: float) -> str:
+    if score >= 70:
+        return "High"
+    if score >= 40:
+        return "Medium"
+    return "Low"
+
+
+def build_risk_assessment(portfolio: dict[str, Any]) -> dict[str, Any]:
+    holdings = pd.DataFrame(portfolio.get("holdings", []))
+    if holdings.empty:
+        return {"ok": False, "note": "No active holdings."}
+    holdings = holdings.copy()
+    holdings["weight"] = holdings["market_value_usd"] / max(1, holdings["market_value_usd"].sum())
+    symbols = tuple(sorted(holdings["symbol"].astype(str).unique()))
+    histories = risk_history(symbols + ("^GSPC", "^NDX"))
+
+    merged: pd.DataFrame | None = None
+    for symbol in symbols:
+        ret = returns_from_history(histories.get(symbol, []), symbol)
+        merged = ret if merged is None else merged.merge(ret, on="date", how="inner")
+    if merged is None or merged.empty:
+        return {"ok": False, "note": "Not enough price history for risk calculation."}
+    returns = merged.set_index("date").tail(180)
+    available_symbols = [symbol for symbol in symbols if symbol in returns.columns]
+    holdings = holdings[holdings["symbol"].isin(available_symbols)].copy()
+    if holdings.empty:
+        return {"ok": False, "note": "Not enough live holdings with price history."}
+    holdings["weight"] = holdings["market_value_usd"] / max(1, holdings["market_value_usd"].sum())
+    weight_series = holdings.set_index("symbol")["weight"].reindex(available_symbols).fillna(0)
+    weights = weight_series.to_numpy(dtype=float)
+    returns = returns[available_symbols].dropna()
+    if returns.empty:
+        return {"ok": False, "note": "Not enough overlapping price history for risk calculation."}
+
+    portfolio_returns = returns.dot(weights)
+    nav = float(portfolio["account"].get("equity_usd") or holdings["market_value_usd"].sum())
+    mv = float(holdings["market_value_usd"].sum())
+    daily_vol = float(portfolio_returns.std(ddof=1) or 0)
+    daily_vol = 0.0 if pd.isna(daily_vol) else daily_vol
+    annual_vol = daily_vol * np.sqrt(252)
+    var_95 = max(0.0, -float(portfolio_returns.quantile(0.05)))
+    tail = portfolio_returns[portfolio_returns <= portfolio_returns.quantile(0.05)]
+    cvar_95 = max(0.0, -float(tail.mean())) if not tail.empty else var_95
+    mdd = max_drawdown(portfolio_returns)
+
+    sp = returns_from_history(histories.get("^GSPC", []), "SPX")
+    nq = returns_from_history(histories.get("^NDX", []), "NDX")
+    benchmark = returns.reset_index().merge(sp, on="date", how="inner").merge(nq, on="date", how="inner")
+    betas: dict[str, float | None] = {}
+    corr_sp: dict[str, float | None] = {}
+    corr_nq: dict[str, float | None] = {}
+    for symbol in available_symbols:
+        if benchmark.empty:
+            betas[symbol] = None
+            corr_sp[symbol] = None
+            corr_nq[symbol] = None
+            continue
+        var_sp = float(benchmark["SPX"].var(ddof=1) or 0)
+        betas[symbol] = float(benchmark[[symbol, "SPX"]].cov().iloc[0, 1] / var_sp) if var_sp else None
+        corr_sp[symbol] = float(benchmark[symbol].corr(benchmark["SPX"]))
+        corr_nq[symbol] = float(benchmark[symbol].corr(benchmark["NDX"]))
+    holdings["beta_sp"] = holdings["symbol"].map(betas)
+    holdings["corr_sp"] = holdings["symbol"].map(corr_sp)
+    holdings["corr_nq"] = holdings["symbol"].map(corr_nq)
+    holdings["ann_vol"] = holdings["symbol"].map(lambda s: float(returns[s].std(ddof=1) * np.sqrt(252)) if s in returns else np.nan)
+
+    cov = returns.cov().to_numpy(dtype=float)
+    port_var = float(weights.T @ cov @ weights) if len(weights) else 0.0
+    if port_var > 0:
+        marginal = cov @ weights
+        contribution = weights * marginal / port_var
+    else:
+        contribution = np.zeros_like(weights)
+    risk_contrib = pd.DataFrame({"Symbol": available_symbols, "Risk Contribution": contribution})
+    holdings = holdings.merge(risk_contrib, left_on="symbol", right_on="Symbol", how="left").drop(columns=["Symbol"])
+
+    hhi = float((holdings["weight"] ** 2).sum())
+    effective_names = 1 / hhi if hhi else 0
+    top1 = float(holdings["weight"].max())
+    top3 = float(holdings.sort_values("weight", ascending=False)["weight"].head(3).sum())
+    weighted_beta = float((holdings["weight"] * holdings["beta_sp"].fillna(1.0)).sum())
+    avg_corr = float(returns.corr().where(~np.eye(len(available_symbols), dtype=bool)).stack().mean()) if len(available_symbols) > 1 else 1.0
+    weighted_beta = 1.0 if pd.isna(weighted_beta) else weighted_beta
+    avg_corr = 0.0 if pd.isna(avg_corr) else avg_corr
+
+    score = 0.0
+    score += min(25, annual_vol / 0.35 * 25)
+    score += min(20, var_95 / 0.025 * 20)
+    score += min(20, top1 / 0.30 * 20)
+    score += min(15, max(0, weighted_beta - 0.8) / 0.8 * 15)
+    score += min(10, max(0, avg_corr - 0.35) / 0.45 * 10)
+    score += min(10, max(0, -mdd) / 0.25 * 10)
+
+    recommendations: list[str] = []
+    if top1 > 0.25:
+        name = holdings.sort_values("weight", ascending=False).iloc[0]["symbol"]
+        recommendations.append(f"{name} 单票权重 {top1:.1%}，已进入集中度警戒区；建议设定减仓/保护触发线，或把新增资金优先分配给低相关持仓。")
+    if effective_names < 6:
+        recommendations.append(f"有效持仓数只有 {effective_names:.1f}，组合看起来比名义持仓更集中；建议用单票上限和行业/主题上限约束。")
+    if weighted_beta > 1.2:
+        recommendations.append(f"组合对 S&P 500 的加权 beta 约 {weighted_beta:.2f}，市场回撤时组合会放大波动；建议用指数仓位/现金/低 beta 持仓降低净 beta。")
+    if annual_vol > 0.30:
+        recommendations.append(f"组合年化波动约 {annual_vol:.1%}，属于高波动组合；建议用 1D VaR 和最大回撤阈值作为强制复盘触发。")
+    if avg_corr > 0.65:
+        recommendations.append(f"持仓平均相关性约 {avg_corr:.2f}，分散化效果有限；压力情景下相关性可能进一步上升。")
+    if not recommendations:
+        recommendations.append("当前量化风险指标没有触发高强度警戒；建议继续监控单票权重、beta、VaR 和相关性是否恶化。")
+
+    scenarios = pd.DataFrame(
+        [
+            {"Scenario": "S&P -3%", "Assumption": "Beta-adjusted market shock", "Estimated PnL": -mv * weighted_beta * 0.03, "Pct NAV": -mv * weighted_beta * 0.03 / nav},
+            {"Scenario": "S&P -5%", "Assumption": "Beta-adjusted market shock", "Estimated PnL": -mv * weighted_beta * 0.05, "Pct NAV": -mv * weighted_beta * 0.05 / nav},
+            {"Scenario": "S&P -10%", "Assumption": "Stress market shock", "Estimated PnL": -mv * weighted_beta * 0.10, "Pct NAV": -mv * weighted_beta * 0.10 / nav},
+            {"Scenario": "Largest name -15%", "Assumption": "Single-name gap on largest position", "Estimated PnL": -mv * top1 * 0.15, "Pct NAV": -mv * top1 * 0.15 / nav},
+            {"Scenario": "Historical 1D VaR 95%", "Assumption": "Past daily return distribution", "Estimated PnL": -nav * var_95, "Pct NAV": -var_95},
+        ]
+    )
+    return {
+        "ok": True,
+        "holdings": holdings,
+        "returns": returns,
+        "portfolio_returns": portfolio_returns,
+        "risk_contrib": risk_contrib,
+        "scenarios": scenarios,
+        "metrics": {
+            "nav": nav,
+            "market_value": mv,
+            "risk_score": min(100, score),
+            "risk_band": risk_band(score),
+            "annual_vol": annual_vol,
+            "var_95": var_95,
+            "cvar_95": cvar_95,
+            "max_drawdown": mdd,
+            "top1": top1,
+            "top3": top3,
+            "effective_names": effective_names,
+            "weighted_beta": weighted_beta,
+            "avg_corr": avg_corr,
+        },
+        "recommendations": recommendations,
+    }
+
+
+def render_risk_assessment(portfolio: dict[str, Any]) -> None:
+    st.subheader("Risk Assessment")
+    risk = build_risk_assessment(portfolio)
+    if not risk.get("ok"):
+        st.info(risk.get("note", "-"))
+        return
+    metrics = risk["metrics"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Risk Score", f"{metrics['risk_score']:.0f}/100", metrics["risk_band"])
+    c2.metric("Annualized Vol", pct(metrics["annual_vol"]))
+    c3.metric("1D VaR 95%", money(-metrics["nav"] * metrics["var_95"]), pct(-metrics["var_95"]))
+    c4.metric("Weighted Beta", f"{metrics['weighted_beta']:.2f}")
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("CVaR 95%", money(-metrics["nav"] * metrics["cvar_95"]), pct(-metrics["cvar_95"]))
+    c6.metric("Max Drawdown", pct(metrics["max_drawdown"]))
+    c7.metric("Top 3 Weight", pct(metrics["top3"]))
+    c8.metric("Effective Names", f"{metrics['effective_names']:.1f}")
+
+    st.markdown("#### Risk Manager View")
+    for item in risk["recommendations"]:
+        st.write(f"- {item}")
+    st.caption("口径：基于当前持仓 market value 权重与最近约 180 个交易日历史收益。结果是风控筛查，不是正式交易指令。")
+
+    holdings = risk["holdings"].sort_values("weight", ascending=False).copy()
+    chart_left, chart_right = st.columns(2, gap="medium")
+    with chart_left:
+        st.markdown("#### Position Weight")
+        alloc = holdings[["symbol", "weight"]].rename(columns={"symbol": "Symbol", "weight": "Weight"}).set_index("Symbol")
+        st.bar_chart(alloc, use_container_width=True, height=300)
+    with chart_right:
+        st.markdown("#### Risk Contribution")
+        rc = holdings[["symbol", "Risk Contribution"]].rename(columns={"symbol": "Symbol"}).set_index("Symbol")
+        st.bar_chart(rc, use_container_width=True, height=300)
+
+    scatter = holdings[["symbol", "weight", "ann_vol", "beta_sp", "Risk Contribution"]].rename(
+        columns={"symbol": "Symbol", "weight": "Weight", "ann_vol": "Annual Vol", "beta_sp": "Beta", "Risk Contribution": "Risk Contribution"}
+    )
+    scatter["Risk Contribution"] = pd.to_numeric(scatter["Risk Contribution"], errors="coerce").abs().fillna(0.001).clip(lower=0.001)
+    scatter["Annual Vol"] = pd.to_numeric(scatter["Annual Vol"], errors="coerce").fillna(0)
+    scatter["Beta"] = pd.to_numeric(scatter["Beta"], errors="coerce").fillna(1)
+    st.markdown("#### Weight vs Volatility")
+    st.scatter_chart(scatter, x="Weight", y="Annual Vol", size="Risk Contribution", color="Beta", use_container_width=True, height=330)
+
+    detail = holdings[
+        ["symbol", "market_value_usd", "weight", "ann_vol", "beta_sp", "corr_sp", "corr_nq", "Risk Contribution", "unrealized_pnl_usd"]
+    ].rename(
+        columns={
+            "symbol": "Symbol",
+            "market_value_usd": "Market Value",
+            "weight": "Weight",
+            "ann_vol": "Annual Vol",
+            "beta_sp": "Beta SPX",
+            "corr_sp": "Corr SPX",
+            "corr_nq": "Corr NDX",
+            "Risk Contribution": "Risk Contribution",
+            "unrealized_pnl_usd": "Unrealized",
+        }
+    )
+    styled = detail.style.format(
+        {
+            "Market Value": "${:,.0f}",
+            "Weight": "{:.2%}",
+            "Annual Vol": "{:.2%}",
+            "Beta SPX": "{:.2f}",
+            "Corr SPX": "{:.2f}",
+            "Corr NDX": "{:.2f}",
+            "Risk Contribution": "{:.2%}",
+            "Unrealized": "${:,.0f}",
+        },
+        na_rep="-",
+    )
+    if hasattr(styled, "map"):
+        styled = styled.map(color_signed, subset=["Unrealized"])
+    else:
+        styled = styled.applymap(color_signed, subset=["Unrealized"])
+    st.markdown("#### Position Risk Table")
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=min(520, 42 + 34 * len(detail)))
+
+    scenario = risk["scenarios"].copy()
+    scenario_view = scenario.style.format({"Estimated PnL": "${:,.0f}", "Pct NAV": "{:+.2%}"})
+    if hasattr(scenario_view, "map"):
+        scenario_view = scenario_view.map(color_signed, subset=["Estimated PnL", "Pct NAV"])
+    else:
+        scenario_view = scenario_view.applymap(color_signed, subset=["Estimated PnL", "Pct NAV"])
+    st.markdown("#### Stress Scenarios")
+    st.dataframe(scenario_view, use_container_width=True, hide_index=True, height=245)
+
+    if len(risk["returns"].columns) > 1:
+        st.markdown("#### Correlation Matrix")
+        corr = risk["returns"].corr().round(2)
+        st.dataframe(corr.style.background_gradient(cmap="RdYlGn_r", vmin=-1, vmax=1).format("{:.2f}"), use_container_width=True)
 
 
 def render_admin(role: str, portfolio: dict[str, Any]) -> None:
@@ -1742,7 +2007,7 @@ def main() -> None:
         st.warning("Cloud ledger is not configured. This run uses local fallback data; sharing needs Apps Script or Google Sheets secrets.")
     trades = load_trades()
     portfolio = compute_portfolio_from_trades(trades)
-    tabs = st.tabs(["Overview", "Trade Entry", "Stock Detail", "Indexes & Macro", "Records"])
+    tabs = st.tabs(["Overview", "Trade Entry", "Stock Detail", "Risk Assessment", "Indexes & Macro", "Records"])
     with tabs[0]:
         render_overview(portfolio)
     with tabs[1]:
@@ -1750,8 +2015,10 @@ def main() -> None:
     with tabs[2]:
         render_stock_detail(portfolio)
     with tabs[3]:
-        render_macro_indexes(portfolio)
+        render_risk_assessment(portfolio)
     with tabs[4]:
+        render_macro_indexes(portfolio)
+    with tabs[5]:
         render_admin(role, portfolio)
 
 
