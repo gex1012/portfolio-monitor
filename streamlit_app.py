@@ -489,6 +489,25 @@ def compact_number(value: Any, decimals: int = 2) -> str:
     return text.rstrip("0").rstrip(".")
 
 
+def compact_large_number(value: Any) -> str:
+    if value in (None, ""):
+        return "-"
+    try:
+        num = float(str(value).replace(",", ""))
+    except Exception:
+        return clean_text(value) or "-"
+    if pd.isna(num):
+        return "-"
+    sign = "-" if num < 0 else ""
+    num = abs(num)
+    units = [(1_000_000_000_000, "T"), (1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")]
+    for base, suffix in units:
+        if num >= base:
+            text = f"{num / base:.2f}".rstrip("0").rstrip(".")
+            return f"{sign}{text}{suffix}"
+    return f"{sign}{compact_number(num)}"
+
+
 def compact_pct(value: Any) -> str:
     if value in (None, ""):
         return "-"
@@ -1300,12 +1319,14 @@ def portfolio_event_calendar(symbols: list[str], days: int = 45) -> list[dict[st
             symbol = clean_text(item.get("symbol") or item.get("ticker")).upper()
             if symbol not in wanted:
                 continue
+            eps = compact_number(item.get("epsEstimated") or item.get("epsEstimate"))
+            revenue = compact_large_number(item.get("revenueEstimated") or item.get("revenueEstimate"))
             rows.append(
                 {
                     "Date": clean_text(item.get("date")) or "-",
                     "Symbol": symbol,
                     "Type": "Earnings",
-                    "Detail": f"EPS est {clean_text(item.get('epsEstimated') or item.get('epsEstimate')) or '-'} | Revenue est {clean_text(item.get('revenueEstimated') or item.get('revenueEstimate')) or '-'}",
+                    "Detail": f"EPS est {eps} | Revenue est {revenue}",
                 }
             )
 
@@ -1315,13 +1336,13 @@ def portfolio_event_calendar(symbols: list[str], days: int = 45) -> list[dict[st
             symbol = clean_text(item.get("symbol") or item.get("ticker")).upper()
             if symbol not in wanted:
                 continue
-            dividend = clean_text(item.get("dividend") or item.get("adjDividend"))
+            dividend = compact_number(item.get("dividend") or item.get("adjDividend"))
             rows.append(
                 {
                     "Date": clean_text(item.get("date") or item.get("exDividendDate")) or "-",
                     "Symbol": symbol,
                     "Type": "Dividend",
-                    "Detail": f"Dividend {dividend or '-'} | Record {clean_text(item.get('recordDate')) or '-'} | Pay {clean_text(item.get('paymentDate')) or '-'}",
+                    "Detail": f"Dividend {dividend} | Record {clean_text(item.get('recordDate')) or '-'} | Pay {clean_text(item.get('paymentDate')) or '-'}",
                 }
             )
 
