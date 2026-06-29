@@ -467,6 +467,80 @@ def pct(value: Any) -> str:
     return f"{float(value) * 100:+.2f}%"
 
 
+def inject_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        .block-container {
+          padding-top: 2rem;
+          padding-bottom: 2.5rem;
+          max-width: 1500px;
+        }
+        h1 {
+          letter-spacing: 0;
+          margin-bottom: 0.4rem;
+        }
+        div[data-testid="stMetric"] {
+          background: #ffffff;
+          border: 1px solid #e5e7eb;
+          border-radius: 8px;
+          padding: 14px 16px;
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        div[data-testid="stMetricLabel"] p {
+          color: #64748b;
+          font-size: 0.84rem;
+        }
+        div[data-testid="stMetricValue"] {
+          color: #172033;
+          font-weight: 700;
+        }
+        .holding-summary {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(150px, 1fr));
+          gap: 10px;
+          margin: 8px 0 12px;
+        }
+        .holding-card {
+          border: 1px solid #e5e7eb;
+          border-left: 4px solid #2563eb;
+          border-radius: 8px;
+          background: #fff;
+          padding: 10px 12px;
+        }
+        .holding-card span {
+          display: block;
+          color: #64748b;
+          font-size: 12px;
+          margin-bottom: 4px;
+        }
+        .holding-card strong {
+          color: #172033;
+          font-size: 18px;
+        }
+        .section-note {
+          color: #64748b;
+          font-size: 13px;
+          margin-bottom: 8px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def color_signed(value: Any) -> str:
+    try:
+        num = float(value)
+    except Exception:
+        return ""
+    if num > 0:
+        return "color: #15803d; font-weight: 600"
+    if num < 0:
+        return "color: #b91c1c; font-weight: 600"
+    return "color: #475569"
+
+
 def login_gate() -> tuple[str, str]:
     if "role" not in st.session_state:
         st.session_state.role = None
@@ -518,20 +592,74 @@ def render_overview(portfolio: dict[str, Any]) -> None:
     if holdings.empty:
         st.warning("No active holdings.")
         return
-    cols = [
-        "symbol",
-        "quantity",
-        "avg_cost",
-        "last_price",
-        "market_value_usd",
-        "unrealized_pnl_usd",
-        "unrealized_pct",
-        "changes_percentage",
-        "rs_vs_nq_20d",
-        "rs_vs_sp_20d",
-    ]
     st.subheader("Active Holdings")
-    st.dataframe(holdings[cols].sort_values("market_value_usd", ascending=False), use_container_width=True, hide_index=True)
+    holdings = holdings.sort_values("market_value_usd", ascending=False)
+    biggest = holdings.iloc[0]
+    positive_count = int((holdings["unrealized_pnl_usd"] > 0).sum())
+    st.markdown(
+        f"""
+        <div class="holding-summary">
+          <div class="holding-card"><span>Active names</span><strong>{len(holdings)}</strong></div>
+          <div class="holding-card"><span>Market value</span><strong>{money(holdings["market_value_usd"].sum())}</strong></div>
+          <div class="holding-card"><span>Profitable names</span><strong>{positive_count} / {len(holdings)}</strong></div>
+          <div class="holding-card"><span>Largest position</span><strong>{biggest["symbol"]} · {money(biggest["market_value_usd"])}</strong></div>
+        </div>
+        <div class="section-note">Sorted by market value. RS columns show 20D relative strength versus Nasdaq 100 and S&P 500.</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    view = holdings[
+        [
+            "symbol",
+            "quantity",
+            "avg_cost",
+            "last_price",
+            "market_value_usd",
+            "unrealized_pnl_usd",
+            "unrealized_pct",
+            "changes_percentage",
+            "rs_vs_nq_20d",
+            "rs_vs_sp_20d",
+        ]
+    ].rename(
+        columns={
+            "symbol": "Symbol",
+            "quantity": "Qty",
+            "avg_cost": "Avg Cost",
+            "last_price": "Last",
+            "market_value_usd": "Market Value",
+            "unrealized_pnl_usd": "Unrealized",
+            "unrealized_pct": "PnL %",
+            "changes_percentage": "Day",
+            "rs_vs_nq_20d": "RS vs NQ",
+            "rs_vs_sp_20d": "RS vs SP",
+        }
+    )
+    styled = (
+        view.style.format(
+            {
+                "Qty": "{:,.0f}",
+                "Avg Cost": "{:,.2f}",
+                "Last": "{:,.2f}",
+                "Market Value": "${:,.0f}",
+                "Unrealized": "${:,.0f}",
+                "PnL %": "{:+.2%}",
+                "Day": "{:+.2f}%",
+                "RS vs NQ": "{:+.2%}",
+                "RS vs SP": "{:+.2%}",
+            },
+            na_rep="-",
+        )
+        .applymap(color_signed, subset=["Unrealized", "PnL %", "Day", "RS vs NQ", "RS vs SP"])
+        .set_properties(subset=["Symbol"], **{"font-weight": "700", "color": "#1d4ed8"})
+        .set_table_styles(
+            [
+                {"selector": "th", "props": [("background-color", "#f8fafc"), ("color", "#475569"), ("font-weight", "700")]},
+                {"selector": "td", "props": [("border-color", "#e5e7eb")]},
+            ]
+        )
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=min(560, 42 + 36 * len(view)))
 
 
 def render_trade_entry(role: str, user: str) -> None:
@@ -647,6 +775,7 @@ def render_admin(role: str, portfolio: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    inject_styles()
     role, user = login_gate()
     st.title("Equity PnL Monitor")
     if not cloud_ledger_enabled():

@@ -7,3 +7,6 @@ __pycache__/
 server-*.log
 server-*.err
 *.log
+trades_seed.csv
+trades_seed_with_manual.csv
+streamlit_secrets_to_paste.toml
