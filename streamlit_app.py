@@ -622,7 +622,10 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
     holdings = [p for p in projects if p["status"] == "active"]
     base_hkd = float(core.CONFIG.get("account_base_hkd", 4_000_000))
     base_usd = base_hkd * fx.get("HKD", 1 / 7.8)
-    total_pnl_usd = realized_total_usd + unrealized_total_usd
+    dividend_rows = load_dividend_records()
+    dividend_total_usd = sum(to_float(row.get("net_usd")) for row in dividend_rows)
+    realized_with_dividend_usd = realized_total_usd + dividend_total_usd
+    total_pnl_usd = realized_with_dividend_usd + unrealized_total_usd
     return {
         "fx": fx_bundle,
         "account": {
@@ -632,6 +635,8 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
             "total_pnl_usd": total_pnl_usd,
             "total_pnl_pct": total_pnl_usd / base_usd if base_usd else 0,
             "realized_pnl_usd": realized_total_usd,
+            "dividend_pnl_usd": dividend_total_usd,
+            "realized_with_dividend_usd": realized_with_dividend_usd,
             "unrealized_pnl_usd": unrealized_total_usd,
             "active_project_count": len(holdings),
             "closed_project_count": len(projects) - len(holdings),
@@ -639,6 +644,7 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
         "holdings": holdings,
         "projects": projects,
         "realized": realized_rows[-250:],
+        "dividends": dividend_rows[-500:],
         "transactions": txs[-500:],
         "benchmarks": {"nq_return_20d": nq_ret, "sp_return_20d": sp_ret, "nq_return_ytd": nq_ytd, "sp_return_ytd": sp_ytd},
         "updated_at": now_iso(),
@@ -1473,11 +1479,13 @@ def login_gate() -> tuple[str, str]:
 def render_overview(portfolio: dict[str, Any]) -> None:
     account = portfolio["account"]
     fx = portfolio["fx"]
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Account Equity", money(account["equity_usd"]))
     c2.metric("Total PnL", money(account["total_pnl_usd"]), pct(account["total_pnl_pct"]))
-    c3.metric("Realized PnL", money(account["realized_pnl_usd"]))
-    c4.metric("Unrealized PnL", money(account["unrealized_pnl_usd"]))
+    c3.metric("Trading Realized", money(account["realized_pnl_usd"]))
+    c4.metric("Dividend PnL", money(account.get("dividend_pnl_usd", 0)))
+    c5.metric("Unrealized PnL", money(account["unrealized_pnl_usd"]))
+    st.caption(f"Realized incl. dividends: {money(account.get('realized_with_dividend_usd', account['realized_pnl_usd']))}")
     spot = fx.get("spot", {})
     to_usd = fx.get("to_usd", {})
     st.caption(
@@ -2652,10 +2660,22 @@ def render_risk_assessment(portfolio: dict[str, Any]) -> None:
 
 
 def render_admin(role: str, portfolio: dict[str, Any]) -> None:
+    account = portfolio["account"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Trading Realized", money(account.get("realized_pnl_usd", 0)))
+    c2.metric("Dividend PnL", money(account.get("dividend_pnl_usd", 0)))
+    c3.metric("Realized incl. Dividends", money(account.get("realized_with_dividend_usd", 0)))
     st.subheader("Transactions")
     st.dataframe(pd.DataFrame(portfolio["transactions"]), use_container_width=True, hide_index=True)
-    st.subheader("Realized PnL")
+    st.subheader("Trading Realized PnL")
     st.dataframe(pd.DataFrame(portfolio["realized"]), use_container_width=True, hide_index=True)
+    st.subheader("Dividend PnL")
+    dividend_records = pd.DataFrame(portfolio.get("dividends", []))
+    if dividend_records.empty:
+        st.info("No dividend PnL records yet.")
+    else:
+        dividend_records = dividend_records.sort_values("date", ascending=False)
+        st.dataframe(dividend_records, use_container_width=True, hide_index=True)
     if role == "admin":
         st.subheader("Audit Log")
         audit = pd.DataFrame(load_audit())
