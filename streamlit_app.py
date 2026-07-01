@@ -360,13 +360,43 @@ def load_dividend_records() -> list[dict[str, Any]]:
         return load_local_dividend_records()
 
 
-def append_dividend_record(row: dict[str, Any]) -> None:
+def is_duplicate_dividend(record: dict[str, Any], rows: list[dict[str, Any]]) -> bool:
+    for row in rows:
+        if clean_text(row.get("date")) != clean_text(record.get("date")):
+            continue
+        if clean_text(row.get("symbol")).upper() != clean_text(record.get("symbol")).upper():
+            continue
+        if clean_text(row.get("currency")).upper() != clean_text(record.get("currency")).upper():
+            continue
+        if abs(to_float(row.get("shares")) - to_float(record.get("shares"))) > 0.0001:
+            continue
+        if abs(to_float(row.get("dividend_per_share")) - to_float(record.get("dividend_per_share"))) > 0.000001:
+            continue
+        if abs(to_float(row.get("gross_amount")) - to_float(record.get("gross_amount"))) > 0.01:
+            continue
+        return True
+    return False
+
+
+def append_dividend_record(row: dict[str, Any]) -> str:
     record = normalize_dividend_row(row)
+    existing_records = load_dividend_records()
     if apps_script_enabled():
-        apps_script_call("append_dividend_record", {"record": record})
-    else:
-        append_local_dividend_record(record)
+        existing_records = existing_records + load_local_dividend_records()
+    if is_duplicate_dividend(record, existing_records):
+        return "duplicate"
+    if apps_script_enabled():
+        try:
+            apps_script_call("append_dividend_record", {"record": record})
+            load_dividend_records_cached.clear()
+            return "cloud"
+        except Exception as exc:
+            append_local_dividend_record(record)
+            load_dividend_records_cached.clear()
+            return f"local_fallback:{exc}"
+    append_local_dividend_record(record)
     load_dividend_records_cached.clear()
+    return "local"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1207,6 +1237,96 @@ def render_options_html(options: dict[str, Any]) -> str:
     return "".join(html)
 
 
+def gex_proxy_frame(options: dict[str, Any], spot: float) -> pd.DataFrame:
+    if not options.get("available") or spot <= 0:
+        return pd.DataFrame()
+    rows = []
+    for row in options.get("distribution", []):
+        strike = to_float(row.get("strike"))
+        if strike <= 0:
+            continue
+        call_oi = to_float(row.get("call_oi"))
+        put_oi = to_float(row.get("put_oi"))
+        distance = abs(strike - spot) / max(spot, 0.01)
+        proximity_weight = 1 / (1 + (distance / 0.08) ** 2)
+        net_contracts = call_oi - put_oi
+        exposure_m = net_contracts * 100 * spot * proximity_weight / 1_000_000
+        rows.append(
+            {
+                "strike": strike,
+                "call_oi": call_oi,
+                "put_oi": put_oi,
+                "net_oi": net_contracts,
+                "gex_proxy_m": exposure_m,
+                "abs_gex_proxy_m": abs(exposure_m),
+                "side": "Call-side GEX" if exposure_m >= 0 else "Put-side GEX",
+            }
+        )
+    return pd.DataFrame(rows).sort_values("strike") if rows else pd.DataFrame()
+
+
+def gex_proxy_comment(gex: pd.DataFrame, spot: float) -> str:
+    if gex.empty:
+        return "GEX proxy 暂无可用数据。"
+    total = float(gex["gex_proxy_m"].sum())
+    wall = gex.loc[gex["abs_gex_proxy_m"].idxmax()]
+    call_wall = gex.loc[gex["call_oi"].idxmax()]
+    put_wall = gex.loc[gex["put_oi"].idxmax()]
+    sorted_rows = gex.sort_values("strike").copy()
+    sorted_rows["cum_gex"] = sorted_rows["gex_proxy_m"].cumsum()
+    zero_gamma = "-"
+    signs = np.sign(sorted_rows["cum_gex"].to_numpy())
+    strikes = sorted_rows["strike"].to_numpy()
+    for idx in range(1, len(signs)):
+        if signs[idx] == 0 or signs[idx] != signs[idx - 1]:
+            zero_gamma = f"{strikes[idx]:,.2f}"
+            break
+    if total >= 0:
+        tone = "整体偏正 GEX，按 OI 近似看，现价附近更容易出现 pin 或波动被压制。"
+        action = "操作上可把最大 GEX strike 当成短线磁吸/压力参考；若放量突破 call wall，再重新评估上行动能。"
+    else:
+        tone = "整体偏负 GEX，按 OI 近似看，价格下跌时对冲压力和波动放大的风险更高。"
+        action = "操作上优先盯 put wall；若跌破且成交放大，短线应降低仓位或收紧止损。"
+    return (
+        f"{tone} 当前 spot {spot:,.2f}，GEX wall 在 {to_float(wall['strike']):,.2f}，"
+        f"Call wall {to_float(call_wall['strike']):,.2f}，Put wall {to_float(put_wall['strike']):,.2f}，"
+        f"Zero-gamma proxy {zero_gamma}。{action}"
+    )
+
+
+def render_gex_proxy(options: dict[str, Any], spot: float) -> None:
+    st.markdown("#### Gamma Exposure Proxy")
+    gex = gex_proxy_frame(options, spot)
+    if gex.empty:
+        st.info("No GEX proxy data. It needs US option OI data and a valid spot price.")
+        return
+    total = float(gex["gex_proxy_m"].sum())
+    wall = gex.loc[gex["abs_gex_proxy_m"].idxmax()]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Net GEX proxy", f"{total:+,.2f}m")
+    c2.metric("GEX wall", f"{to_float(wall['strike']):,.2f}")
+    c3.metric("Spot", f"{spot:,.2f}")
+    chart = (
+        alt.Chart(gex)
+        .mark_bar()
+        .encode(
+            x=alt.X("strike:O", title="Strike", sort=list(gex["strike"])),
+            y=alt.Y("gex_proxy_m:Q", title="GEX proxy, $m"),
+            color=alt.Color("side:N", scale=alt.Scale(range=["#176b87", "#a66a00"]), legend=alt.Legend(title=None, orient="bottom")),
+            tooltip=[
+                alt.Tooltip("strike:Q", title="Strike", format=",.2f"),
+                alt.Tooltip("call_oi:Q", title="Call OI", format=",.0f"),
+                alt.Tooltip("put_oi:Q", title="Put OI", format=",.0f"),
+                alt.Tooltip("gex_proxy_m:Q", title="GEX proxy $m", format="+,.2f"),
+            ],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.caption("GEX proxy = (Call OI - Put OI) x 100 x spot x distance weight. 这是 OI 近似，不等同于完整 dealer gamma。")
+    st.info(gex_proxy_comment(gex, spot))
+
+
 def render_option_oi_history(symbol: str) -> None:
     history = pd.DataFrame(load_option_oi_history())
     symbol = clean_text(symbol).upper()
@@ -1567,7 +1687,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
 
     if submitted:
         try:
-            append_dividend_record(
+            save_result = append_dividend_record(
                 {
                     "date": pay_date.isoformat(),
                     "symbol": selected,
@@ -1590,8 +1710,12 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
                     "created_at": now_iso(),
                 }
             )
-            st.success("Dividend record saved.")
-            st.rerun()
+            if save_result == "duplicate":
+                st.warning("Duplicate dividend record detected. It was not saved again.")
+            elif save_result.startswith("local_fallback:"):
+                st.warning("Dividend record saved locally. Cloud save failed because Apps Script needs the latest deployment.")
+            else:
+                st.success("Dividend record saved.")
         except Exception as exc:
             st.error(str(exc))
 
@@ -1707,6 +1831,9 @@ def render_stock_detail(portfolio: dict[str, Any]) -> None:
         if record_msg:
             st.caption(record_msg)
 
+    history_rows = tech.get("history", [])
+    latest_close = to_float(history_rows[-1].get("close")) if history_rows else 0.0
+    render_gex_proxy(options, latest_close)
     render_option_oi_history(symbol)
 
     news = detail.get("news", {})
