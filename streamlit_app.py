@@ -1433,6 +1433,114 @@ def render_gex_proxy(options: dict[str, Any], spot: float) -> None:
     st.info(gex_proxy_comment(gex, spot))
 
 
+def gex_proxy_frame(options: dict[str, Any], spot: float) -> pd.DataFrame:
+    if not options.get("available") or spot <= 0:
+        return pd.DataFrame()
+    rows = []
+    for row in options.get("distribution", []):
+        strike = to_float(row.get("strike"))
+        if strike <= 0:
+            continue
+        call_oi = to_float(row.get("call_oi"))
+        put_oi = to_float(row.get("put_oi"))
+        distance = abs(strike - spot) / max(spot, 0.01)
+        proximity_weight = 1 / (1 + (distance / 0.08) ** 2)
+        call_exposure_m = call_oi * 100 * spot * proximity_weight / 1_000_000
+        put_exposure_m = put_oi * 100 * spot * proximity_weight / 1_000_000
+        exposure_m = call_exposure_m - put_exposure_m
+        rows.append(
+            {
+                "strike": strike,
+                "call_oi": call_oi,
+                "put_oi": put_oi,
+                "net_oi": call_oi - put_oi,
+                "distance_pct": distance,
+                "proximity_weight": proximity_weight,
+                "call_gex_proxy_m": call_exposure_m,
+                "put_gex_proxy_m": put_exposure_m,
+                "gex_proxy_m": exposure_m,
+                "abs_gex_proxy_m": abs(exposure_m),
+                "side": "Call-side proxy" if exposure_m >= 0 else "Put-side proxy",
+            }
+        )
+    return pd.DataFrame(rows).sort_values("strike") if rows else pd.DataFrame()
+
+
+def gex_proxy_comment(gex: pd.DataFrame, spot: float) -> str:
+    if gex.empty:
+        return "GEX proxy 暂无可用数据。"
+    total = float(gex["gex_proxy_m"].sum())
+    near = gex[gex["distance_pct"] <= 0.20].copy()
+    if near.empty:
+        near = gex.copy()
+    gex_wall = near.loc[near["abs_gex_proxy_m"].idxmax()]
+    call_pressure = near.loc[near["call_gex_proxy_m"].idxmax()]
+    put_pressure = near.loc[near["put_gex_proxy_m"].idxmax()]
+    raw_call_wall = gex.loc[gex["call_oi"].idxmax()]
+    raw_put_wall = gex.loc[gex["put_oi"].idxmax()]
+    sorted_rows = gex.sort_values("strike").copy()
+    sorted_rows["cum_gex"] = sorted_rows["gex_proxy_m"].cumsum()
+    zero_cross = "-"
+    signs = np.sign(sorted_rows["cum_gex"].to_numpy())
+    strikes = sorted_rows["strike"].to_numpy()
+    for idx in range(1, len(signs)):
+        if signs[idx] == 0 or signs[idx] != signs[idx - 1]:
+            zero_cross = f"{strikes[idx]:,.2f}"
+            break
+    if total >= 0:
+        tone = "按 OI 近似，现价附近净值偏正，说明 call-side OI 经距离加权后占优，价格可能更容易被吸附在高 OI 区域，短线波动有被压制的倾向。"
+        action = "操作上更应该盯现价附近的 GEX wall / call pressure，而不是远离现价的原始 OI wall。"
+    else:
+        tone = "按 OI 近似，现价附近净值偏负，说明 put-side OI 经距离加权后占优，下跌时波动放大风险更高。"
+        action = "操作上优先盯现价附近的 put pressure；跌破且放量时应降低仓位或收紧止损。"
+    return (
+        f"{tone} 当前 spot {spot:,.2f}，near-spot GEX wall 在 {to_float(gex_wall['strike']):,.2f}，"
+        f"call pressure {to_float(call_pressure['strike']):,.2f}，put pressure {to_float(put_pressure['strike']):,.2f}。"
+        f"原始 OI 最大点：Call {to_float(raw_call_wall['strike']):,.2f} / Put {to_float(raw_put_wall['strike']):,.2f}；"
+        f"cumulative proxy cross {zero_cross}。{action}"
+    )
+
+
+def render_gex_proxy(options: dict[str, Any], spot: float) -> None:
+    st.markdown("#### Gamma Exposure Proxy")
+    gex = gex_proxy_frame(options, spot)
+    if gex.empty:
+        st.info("No GEX proxy data. It needs US option OI data and a valid spot price.")
+        return
+    total = float(gex["gex_proxy_m"].sum())
+    near = gex[gex["distance_pct"] <= 0.20].copy()
+    if near.empty:
+        near = gex.copy()
+    wall = near.loc[near["abs_gex_proxy_m"].idxmax()]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Net GEX proxy", f"{total:+,.2f}m")
+    c2.metric("Near-spot GEX wall", f"{to_float(wall['strike']):,.2f}")
+    c3.metric("Spot", f"{spot:,.2f}")
+    chart = (
+        alt.Chart(gex)
+        .mark_bar()
+        .encode(
+            x=alt.X("strike:O", title="Strike", sort=list(gex["strike"])),
+            y=alt.Y("gex_proxy_m:Q", title="Near-weighted OI proxy, $m"),
+            color=alt.Color("side:N", scale=alt.Scale(range=["#176b87", "#a66a00"]), legend=alt.Legend(title=None, orient="bottom")),
+            tooltip=[
+                alt.Tooltip("strike:Q", title="Strike", format=",.2f"),
+                alt.Tooltip("call_oi:Q", title="Call OI", format=",.0f"),
+                alt.Tooltip("put_oi:Q", title="Put OI", format=",.0f"),
+                alt.Tooltip("proximity_weight:Q", title="Near-spot weight", format=".2f"),
+                alt.Tooltip("gex_proxy_m:Q", title="GEX proxy $m", format="+,.2f"),
+            ],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.caption(
+        "This is a near-spot OI proxy: (Call OI - Put OI) x 100 x spot x distance weight. "
+        "It is not full dealer GEX because the free Cboe delayed feed here does not provide option gamma/IV for every contract."
+    )
+    st.info(gex_proxy_comment(gex, spot))
+
+
 def render_option_oi_history(symbol: str) -> None:
     history = pd.DataFrame(load_option_oi_history())
     symbol = clean_text(symbol).upper()
