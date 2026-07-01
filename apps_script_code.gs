@@ -133,6 +133,47 @@ function appendRow(name, headers, item) {
   sheet.appendRow(row);
 }
 
+function findRowById(sheet, headers, idValue) {
+  const idColumn = headers.indexOf('id') + 1;
+  if (idColumn <= 0) {
+    throw new Error('Sheet has no id column.');
+  }
+  const target = String(idValue || '').trim();
+  if (!target) {
+    throw new Error('Record id is required.');
+  }
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    return 0;
+  }
+  const values = sheet.getRange(2, idColumn, lastRow - 1, 1).getValues();
+  for (let i = 0; i < values.length; i += 1) {
+    if (String(values[i][0] || '').trim() === target) {
+      return i + 2;
+    }
+  }
+  return 0;
+}
+
+function updateRowById(name, headers, item) {
+  const sheet = getSheet(name, headers);
+  const rowIndex = findRowById(sheet, headers, item && item.id);
+  if (!rowIndex) {
+    throw new Error(`Record not found: ${item && item.id}`);
+  }
+  const row = headers.map(header => item && item[header] !== undefined ? item[header] : '');
+  sheet.getRange(rowIndex, 1, 1, headers.length).setValues([row]);
+}
+
+function deleteRowById(name, headers, idValue) {
+  const sheet = getSheet(name, headers);
+  const rowIndex = findRowById(sheet, headers, idValue);
+  if (!rowIndex) {
+    throw new Error(`Record not found: ${idValue}`);
+  }
+  sheet.deleteRow(rowIndex);
+}
+
 function upsertOptionOiHistory(item) {
   const sheet = getSheet(OPTION_OI_SHEET, OPTION_OI_HEADERS);
   const rowItem = item || {};
@@ -217,6 +258,16 @@ function doPost(e) {
     if (action === 'append_dividend_record') {
       appendRow(DIVIDEND_SHEET, DIVIDEND_HEADERS, body.record || {});
       return ok({ message: 'Dividend record appended.' });
+    }
+
+    if (action === 'update_dividend_record') {
+      updateRowById(DIVIDEND_SHEET, DIVIDEND_HEADERS, body.record || {});
+      return ok({ message: 'Dividend record updated.' });
+    }
+
+    if (action === 'delete_dividend_record') {
+      deleteRowById(DIVIDEND_SHEET, DIVIDEND_HEADERS, body.id || '');
+      return ok({ message: 'Dividend record deleted.' });
     }
 
     throw new Error(`Unknown action: ${action}`);

@@ -23,6 +23,7 @@ DATA_DIR = ROOT / "data"
 LOCAL_TRADES_PATH = DATA_DIR / "streamlit_trades.json"
 LOCAL_OPTION_OI_PATH = DATA_DIR / "option_oi_history.json"
 LOCAL_DIVIDEND_PATH = DATA_DIR / "dividend_records.json"
+LOCAL_DIVIDEND_DELETED_PATH = DATA_DIR / "dividend_deleted_ids.json"
 TRADE_HEADERS = [
     "id",
     "date",
@@ -352,6 +353,32 @@ def load_local_dividend_records() -> list[dict[str, Any]]:
         return []
 
 
+def load_local_dividend_deleted_ids() -> set[str]:
+    if not LOCAL_DIVIDEND_DELETED_PATH.exists():
+        return set()
+    try:
+        data = json.loads(LOCAL_DIVIDEND_DELETED_PATH.read_text(encoding="utf-8"))
+        return {clean_text(x) for x in data if clean_text(x)} if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+
+def save_local_dividend_deleted_ids(ids: set[str]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_DIVIDEND_DELETED_PATH.write_text(json.dumps(sorted(ids), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def merge_dividend_records(cloud_rows: list[dict[str, Any]], local_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deleted_ids = load_local_dividend_deleted_ids()
+    merged: dict[str, dict[str, Any]] = {}
+    for row in cloud_rows + local_rows:
+        record = normalize_dividend_row(row)
+        record_id = clean_text(record.get("id"))
+        if record_id and record_id not in deleted_ids:
+            merged[record_id] = record
+    return list(merged.values())
+
+
 def append_local_dividend_record(row: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     rows = load_local_dividend_records()
@@ -359,12 +386,38 @@ def append_local_dividend_record(row: dict[str, Any]) -> None:
     LOCAL_DIVIDEND_PATH.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def upsert_local_dividend_record(row: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    record = normalize_dividend_row(row)
+    rows = load_local_dividend_records()
+    found = False
+    for idx, existing in enumerate(rows):
+        if clean_text(existing.get("id")) == clean_text(record.get("id")):
+            rows[idx] = record
+            found = True
+            break
+    if not found:
+        rows.append(record)
+    LOCAL_DIVIDEND_PATH.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def delete_local_dividend_record(record_id: str) -> None:
+    target = clean_text(record_id)
+    rows = [row for row in load_local_dividend_records() if clean_text(row.get("id")) != target]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_DIVIDEND_PATH.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    deleted_ids = load_local_dividend_deleted_ids()
+    deleted_ids.add(target)
+    save_local_dividend_deleted_ids(deleted_ids)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_dividend_records_cached(cache_key: str) -> list[dict[str, Any]]:
     if apps_script_enabled():
         rows = apps_script_call("read_dividend_records").get("rows", [])
-        return [normalize_dividend_row(row) for row in rows if clean_text(row.get("symbol"))]
-    return load_local_dividend_records()
+        cloud_rows = [normalize_dividend_row(row) for row in rows if clean_text(row.get("symbol"))]
+        return merge_dividend_records(cloud_rows, load_local_dividend_records())
+    return merge_dividend_records([], load_local_dividend_records())
 
 
 def load_dividend_records() -> list[dict[str, Any]]:
@@ -410,6 +463,38 @@ def append_dividend_record(row: dict[str, Any]) -> str:
             load_dividend_records_cached.clear()
             return f"local_fallback:{exc}"
     append_local_dividend_record(record)
+    load_dividend_records_cached.clear()
+    return "local"
+
+
+def update_dividend_record(row: dict[str, Any]) -> str:
+    record = normalize_dividend_row(row)
+    if apps_script_enabled():
+        try:
+            apps_script_call("update_dividend_record", {"record": record})
+            load_dividend_records_cached.clear()
+            return "cloud"
+        except Exception as exc:
+            upsert_local_dividend_record(record)
+            load_dividend_records_cached.clear()
+            return f"local_fallback:{exc}"
+    upsert_local_dividend_record(record)
+    load_dividend_records_cached.clear()
+    return "local"
+
+
+def delete_dividend_record(record_id: str) -> str:
+    target = clean_text(record_id)
+    if apps_script_enabled():
+        try:
+            apps_script_call("delete_dividend_record", {"id": target})
+            load_dividend_records_cached.clear()
+            return "cloud"
+        except Exception as exc:
+            delete_local_dividend_record(target)
+            load_dividend_records_cached.clear()
+            return f"local_fallback:{exc}"
+    delete_local_dividend_record(target)
     load_dividend_records_cached.clear()
     return "local"
 
@@ -1794,6 +1879,114 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
         na_rep="-",
     )
     st.dataframe(styled, use_container_width=True, hide_index=True, height=min(520, 42 + 34 * len(view)))
+    if role not in {"editor", "admin"}:
+        return
+
+    st.markdown("#### Edit / Delete Dividend Record")
+    editable_records = records.to_dict("records")
+    labels = [
+        f"{clean_text(row.get('date'))} | {clean_text(row.get('symbol'))} | "
+        f"{currency_amount(row.get('net_amount'), clean_text(row.get('currency')))} | {clean_text(row.get('id'))[-8:]}"
+        for row in editable_records
+    ]
+    selected_label = st.selectbox("Select record", labels, key="dividend_edit_select")
+    edit_row = dict(editable_records[labels.index(selected_label)])
+    edit_id = clean_text(edit_row.get("id"))
+
+    e1, e2, e3, e4 = st.columns(4)
+    try:
+        edit_date_default = dt.date.fromisoformat(clean_text(edit_row.get("date"))[:10])
+    except Exception:
+        edit_date_default = dt.date.today()
+    edit_date = e1.date_input("Edit date", value=edit_date_default, key=f"edit_div_date_{edit_id}")
+    edit_symbol = e2.text_input("Symbol", value=clean_text(edit_row.get("symbol")), disabled=True, key=f"edit_div_symbol_{edit_id}")
+    edit_shares = e3.number_input("Shares", min_value=0.0, value=float(to_float(edit_row.get("shares"))), step=1.0, key=f"edit_div_shares_{edit_id}")
+    edit_dps = e4.number_input(
+        "Dividend / share",
+        min_value=0.0,
+        value=float(to_float(edit_row.get("dividend_per_share"))),
+        step=0.0001,
+        format="%.4f",
+        key=f"edit_div_dps_{edit_id}",
+    )
+
+    e5, e6, e7, e8 = st.columns(4)
+    currency_options = ["USD", "HKD", "CNY", "EUR", "GBP", "JPY", "SGD"]
+    edit_currency_default = clean_text(edit_row.get("currency")).upper() or "USD"
+    edit_currency_idx = currency_options.index(edit_currency_default) if edit_currency_default in currency_options else 0
+    edit_currency = e5.selectbox("Currency", currency_options, index=edit_currency_idx, key=f"edit_div_currency_{edit_id}")
+    edit_gross = edit_shares * edit_dps
+    edit_tax_rate = e6.number_input(
+        "Tax rate",
+        min_value=0.0,
+        max_value=1.0,
+        value=float(to_float(edit_row.get("tax_rate"))),
+        step=0.01,
+        format="%.2f",
+        key=f"edit_div_tax_rate_{edit_id}",
+    )
+    edit_tax_amount = e7.number_input(
+        "Tax amount",
+        min_value=0.0,
+        value=float(to_float(edit_row.get("tax_amount")) or edit_gross * edit_tax_rate),
+        step=0.01,
+        key=f"edit_div_tax_amount_{edit_id}",
+    )
+    edit_fee = e8.number_input("Dividend fee", min_value=0.0, value=float(to_float(edit_row.get("fee"))), step=0.01, key=f"edit_div_fee_{edit_id}")
+
+    e9, e10 = st.columns([1, 3])
+    edit_fx = e9.number_input(
+        "FX to USD",
+        min_value=0.0,
+        value=float(to_float(edit_row.get("fx_to_usd")) or portfolio.get("fx", {}).get("to_usd", {}).get(edit_currency, 1.0)),
+        step=0.0001,
+        format="%.5f",
+        key=f"edit_div_fx_{edit_id}",
+    )
+    edit_note = e10.text_input("Note / source", value=clean_text(edit_row.get("announcement_note")), key=f"edit_div_note_{edit_id}")
+    edit_net = max(0.0, edit_gross - edit_tax_amount - edit_fee)
+    edit_net_usd = edit_net * edit_fx
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Edited Gross", currency_amount(edit_gross, edit_currency))
+    s2.metric("Edited Tax", currency_amount(edit_tax_amount, edit_currency))
+    s3.metric("Edited Net", currency_amount(edit_net, edit_currency))
+    s4.metric("Edited Net USD", money(edit_net_usd))
+
+    b1, b2 = st.columns([1, 1])
+    if b1.button("Save edited dividend", type="primary", key=f"save_div_{edit_id}"):
+        updated = {
+            **edit_row,
+            "id": edit_id,
+            "date": edit_date.isoformat(),
+            "symbol": edit_symbol,
+            "shares": edit_shares,
+            "dividend_per_share": edit_dps,
+            "currency": edit_currency,
+            "gross_amount": edit_gross,
+            "tax_rate": edit_tax_rate,
+            "tax_amount": edit_tax_amount,
+            "fee": edit_fee,
+            "net_amount": edit_net,
+            "fx_to_usd": edit_fx,
+            "net_usd": edit_net_usd,
+            "announcement_note": edit_note,
+            "source": "streamlit_dividend_edit",
+            "created_by": user,
+        }
+        result = update_dividend_record(updated)
+        if result.startswith("local_fallback:"):
+            st.warning("Edited dividend saved locally. Cloud update needs the latest Apps Script deployment.")
+        else:
+            st.success("Dividend record updated.")
+        st.rerun()
+    confirm_delete = b2.checkbox("Confirm delete", key=f"confirm_delete_div_{edit_id}")
+    if b2.button("Delete dividend record", disabled=not confirm_delete, key=f"delete_div_{edit_id}"):
+        result = delete_dividend_record(edit_id)
+        if result.startswith("local_fallback:"):
+            st.warning("Dividend record hidden locally. Cloud delete needs the latest Apps Script deployment.")
+        else:
+            st.success("Dividend record deleted.")
+        st.rerun()
 
 
 def render_stock_detail(portfolio: dict[str, Any]) -> None:
