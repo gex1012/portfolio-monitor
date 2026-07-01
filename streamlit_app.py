@@ -155,8 +155,16 @@ def apps_script_call(action: str, payload: dict[str, Any] | None = None) -> dict
         headers={"Content-Type": "application/json; charset=utf-8", "User-Agent": "EquityPnLMonitor/1.0"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=20) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8")[:500]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"Apps Script HTTP {exc.code} while running {action}. {detail}") from exc
     if not data.get("ok"):
         raise RuntimeError(str(data.get("error") or f"Apps Script action failed: {action}"))
     return data
@@ -271,7 +279,14 @@ def load_trades_cached(cache_key: str) -> list[dict[str, Any]]:
 
 def load_trades() -> list[dict[str, Any]]:
     key = "cloud" if cloud_ledger_enabled() else str(LOCAL_TRADES_PATH.stat().st_mtime if LOCAL_TRADES_PATH.exists() else 0)
-    return load_trades_cached(key)
+    try:
+        return load_trades_cached(key)
+    except Exception as exc:
+        st.warning(f"Cloud trade ledger unavailable. Using local fallback for this run. Detail: {exc}")
+        initial = core.excel_transactions()
+        rows = initial.get("transactions", []) if initial.get("ok") else []
+        rows.extend(load_local_rows())
+        return [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
 
 
 def append_trade(row: dict[str, Any]) -> None:
