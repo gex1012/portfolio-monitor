@@ -24,6 +24,7 @@ Users open your website
 - `apps_script_code.gs`: Google Apps Script web app code.
 - Google Sheet tab `Trades`: shared transaction ledger.
 - Google Sheet tab `Audit Log`: who changed what and when.
+- Google Sheet tab `Dividend Records`: manually reviewed dividend receipts.
 
 Do not commit real secrets, Excel files, or trade data to GitHub.
 
@@ -84,7 +85,7 @@ url = "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL"
 token = "make-a-long-random-token"
 ```
 
-When `apps_script_code.gs` changes, paste the new file into Apps Script and deploy a new web-app version. The option OI history recorder needs the `Option OI History` sheet actions from the latest script.
+When `apps_script_code.gs` changes, paste the new file into Apps Script and deploy a new web-app version. The option OI history recorder and dividend module need the latest Apps Script sheet actions.
 
 ## Streamlit Cloud Deployment
 

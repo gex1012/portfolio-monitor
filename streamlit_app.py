@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 LOCAL_TRADES_PATH = DATA_DIR / "streamlit_trades.json"
 LOCAL_OPTION_OI_PATH = DATA_DIR / "option_oi_history.json"
+LOCAL_DIVIDEND_PATH = DATA_DIR / "dividend_records.json"
 TRADE_HEADERS = [
     "id",
     "date",
@@ -53,6 +54,28 @@ OPTION_OI_HEADERS = [
     "nearest_max_put_oi",
     "source",
     "timestamp",
+]
+DIVIDEND_HEADERS = [
+    "id",
+    "date",
+    "symbol",
+    "shares",
+    "dividend_per_share",
+    "currency",
+    "gross_amount",
+    "tax_rate",
+    "tax_amount",
+    "fee",
+    "net_amount",
+    "fx_to_usd",
+    "net_usd",
+    "announcement_ex_date",
+    "announcement_record_date",
+    "announcement_payment_date",
+    "announcement_note",
+    "source",
+    "created_by",
+    "created_at",
 ]
 
 
@@ -279,6 +302,99 @@ def load_audit() -> list[dict[str, Any]]:
     if not google_sheet_enabled():
         return []
     return read_sheet_rows(str(secret_value("google_sheets", "audit_worksheet", default="Audit Log")), AUDIT_HEADERS)
+
+
+CURRENCY_SYMBOLS = {"USD": "$", "HKD": "HK$", "CNY": "¥", "EUR": "€", "GBP": "£", "JPY": "¥", "SGD": "S$"}
+
+
+def currency_amount(value: Any, currency: str) -> str:
+    symbol = CURRENCY_SYMBOLS.get(clean_text(currency).upper(), clean_text(currency).upper() + " ")
+    num = to_float(value)
+    return f"{symbol}{num:,.2f}" if num >= 0 else f"-{symbol}{abs(num):,.2f}"
+
+
+def normalize_dividend_row(row: dict[str, Any]) -> dict[str, Any]:
+    clean = {key: row.get(key, "") for key in DIVIDEND_HEADERS}
+    clean["id"] = clean_text(clean.get("id")) or f"div-{int(time.time() * 1000)}"
+    clean["date"] = clean_text(clean.get("date")) or dt.date.today().isoformat()
+    clean["symbol"] = clean_text(clean.get("symbol")).upper()
+    clean["currency"] = clean_text(clean.get("currency")).upper() or "USD"
+    clean["source"] = clean_text(clean.get("source")) or "manual"
+    clean["created_by"] = clean_text(clean.get("created_by")) or "unknown"
+    clean["created_at"] = clean_text(clean.get("created_at")) or now_iso()
+    for key in ["shares", "dividend_per_share", "gross_amount", "tax_rate", "tax_amount", "fee", "net_amount", "fx_to_usd", "net_usd"]:
+        clean[key] = to_float(clean.get(key))
+    return clean
+
+
+def load_local_dividend_records() -> list[dict[str, Any]]:
+    if not LOCAL_DIVIDEND_PATH.exists():
+        return []
+    try:
+        data = json.loads(LOCAL_DIVIDEND_PATH.read_text(encoding="utf-8"))
+        return [normalize_dividend_row(row) for row in data] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def append_local_dividend_record(row: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    rows = load_local_dividend_records()
+    rows.append(normalize_dividend_row(row))
+    LOCAL_DIVIDEND_PATH.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_dividend_records_cached(cache_key: str) -> list[dict[str, Any]]:
+    if apps_script_enabled():
+        rows = apps_script_call("read_dividend_records").get("rows", [])
+        return [normalize_dividend_row(row) for row in rows if clean_text(row.get("symbol"))]
+    return load_local_dividend_records()
+
+
+def load_dividend_records() -> list[dict[str, Any]]:
+    key = "cloud" if apps_script_enabled() else str(LOCAL_DIVIDEND_PATH.stat().st_mtime if LOCAL_DIVIDEND_PATH.exists() else 0)
+    try:
+        return load_dividend_records_cached(key)
+    except Exception:
+        return load_local_dividend_records()
+
+
+def append_dividend_record(row: dict[str, Any]) -> None:
+    record = normalize_dividend_row(row)
+    if apps_script_enabled():
+        apps_script_call("append_dividend_record", {"record": record})
+    else:
+        append_local_dividend_record(record)
+    load_dividend_records_cached.clear()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def dividend_announcements_cached(cache_key: str, start: str, end: str) -> list[dict[str, Any]]:
+    data = core.fmp_get("/stable/dividends-calendar", {"from": start, "to": end}, ttl=3600)
+    return data if isinstance(data, list) else []
+
+
+def dividend_announcement_for_symbol(symbol: str) -> dict[str, Any] | None:
+    today = dt.date.today()
+    start = (today - dt.timedelta(days=45)).isoformat()
+    end = (today + dt.timedelta(days=365)).isoformat()
+    wanted = clean_text(symbol).upper()
+    rows = dividend_announcements_cached("calendar", start, end)
+    candidates = []
+    for row in rows:
+        row_symbol = clean_text(row.get("symbol") or row.get("ticker")).upper()
+        if row_symbol != wanted:
+            continue
+        raw_date = clean_text(row.get("date") or row.get("exDividendDate"))
+        try:
+            event_date = dt.date.fromisoformat(raw_date[:10])
+        except Exception:
+            event_date = today
+        candidates.append((abs((event_date - today).days), row))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda x: x[0])[0][1]
 
 
 def normalize_option_oi_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -1385,6 +1501,154 @@ def render_trade_entry(role: str, user: str) -> None:
                 st.error(str(exc))
 
 
+def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
+    st.subheader("Dividends")
+    holdings = pd.DataFrame(portfolio.get("holdings", []))
+    if holdings.empty:
+        st.info("No active holdings. Dividend input is limited to current holdings.")
+        return
+    holdings = holdings.sort_values("symbol").copy()
+    symbols = holdings["symbol"].astype(str).tolist()
+    selected = st.selectbox("Holding stock", symbols)
+    holding = holdings[holdings["symbol"] == selected].iloc[0]
+    default_currency = clean_text(holding.get("currency")) or core.infer_currency(selected)
+    announcement = dividend_announcement_for_symbol(selected)
+    fx = portfolio.get("fx", {}).get("to_usd", {})
+
+    announced_dps = 0.0
+    announcement_note = "-"
+    ex_date = ""
+    record_date = ""
+    payment_date = ""
+    if announcement:
+        announced_dps = to_float(announcement.get("dividend") or announcement.get("adjDividend"))
+        ex_date = clean_text(announcement.get("date") or announcement.get("exDividendDate"))
+        record_date = clean_text(announcement.get("recordDate"))
+        payment_date = clean_text(announcement.get("paymentDate"))
+        announcement_note = (
+            f"Announcement: DPS {announced_dps:.4f} | Ex {ex_date or '-'} | "
+            f"Record {record_date or '-'} | Pay {payment_date or '-'}"
+        )
+
+    st.info(announcement_note)
+    if role not in {"editor", "admin"}:
+        st.caption("Viewer can review dividend calculations and records. Editor/Admin can save new dividend records.")
+
+    c1, c2, c3, c4 = st.columns(4)
+    pay_date = c1.date_input("Dividend date", value=dt.date.today())
+    shares = c2.number_input("Shares", min_value=0.0, value=float(to_float(holding.get("quantity"))), step=1.0)
+    dps = c3.number_input("Dividend / share", min_value=0.0, value=float(announced_dps), step=0.0001, format="%.4f")
+    currency_options = ["USD", "HKD", "CNY", "EUR", "GBP", "JPY", "SGD"]
+    default_idx = currency_options.index(default_currency) if default_currency in currency_options else 0
+    currency = c4.selectbox("Currency symbol", currency_options, index=default_idx)
+
+    gross = shares * dps
+    c5, c6, c7, c8 = st.columns(4)
+    default_tax_rate = 0.30 if currency == "USD" and not selected.endswith(".HK") else 0.0
+    tax_rate = c5.number_input("Tax rate", min_value=0.0, max_value=1.0, value=float(default_tax_rate), step=0.01, format="%.2f")
+    tax_amount = c6.number_input("Tax amount", min_value=0.0, value=float(gross * tax_rate), step=0.01)
+    fee = c7.number_input("Dividend fee", min_value=0.0, value=0.0, step=0.01)
+    fx_to_usd = c8.number_input("FX to USD", min_value=0.0, value=float(fx.get(currency, 1.0)), step=0.0001, format="%.5f")
+    net = max(0.0, gross - tax_amount - fee)
+    net_usd = net * fx_to_usd
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Gross", currency_amount(gross, currency))
+    m2.metric("Tax", currency_amount(tax_amount, currency))
+    m3.metric("Fee", currency_amount(fee, currency))
+    m4.metric("Net USD", money(net_usd))
+    st.caption(
+        f"Formula: {shares:,.0f} shares x {currency_amount(dps, currency)} - "
+        f"{currency_amount(tax_amount, currency)} tax - {currency_amount(fee, currency)} fee = "
+        f"{currency_amount(net, currency)} / {money(net_usd)}"
+    )
+    note = st.text_input("Manual note / source", value=announcement_note if announcement else "")
+    submitted = st.button("Save dividend record", type="primary", disabled=role not in {"editor", "admin"})
+
+    if submitted:
+        try:
+            append_dividend_record(
+                {
+                    "date": pay_date.isoformat(),
+                    "symbol": selected,
+                    "shares": shares,
+                    "dividend_per_share": dps,
+                    "currency": currency,
+                    "gross_amount": gross,
+                    "tax_rate": tax_rate,
+                    "tax_amount": tax_amount,
+                    "fee": fee,
+                    "net_amount": net,
+                    "fx_to_usd": fx_to_usd,
+                    "net_usd": net_usd,
+                    "announcement_ex_date": ex_date,
+                    "announcement_record_date": record_date,
+                    "announcement_payment_date": payment_date,
+                    "announcement_note": note,
+                    "source": "streamlit_dividend",
+                    "created_by": user,
+                    "created_at": now_iso(),
+                }
+            )
+            st.success("Dividend record saved.")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+    records = pd.DataFrame(load_dividend_records())
+    st.markdown("#### Dividend Records")
+    if records.empty:
+        st.info("No dividend records yet.")
+        return
+    records = records.sort_values("date", ascending=False)
+    total_net_usd = records["net_usd"].apply(to_float).sum()
+    st.metric("Total dividend received / recorded", money(total_net_usd))
+    view = records[
+        [
+            "date",
+            "symbol",
+            "shares",
+            "dividend_per_share",
+            "currency",
+            "gross_amount",
+            "tax_amount",
+            "fee",
+            "net_amount",
+            "net_usd",
+            "announcement_payment_date",
+            "created_by",
+        ]
+    ].rename(
+        columns={
+            "date": "Date",
+            "symbol": "Symbol",
+            "shares": "Shares",
+            "dividend_per_share": "DPS",
+            "currency": "Ccy",
+            "gross_amount": "Gross",
+            "tax_amount": "Tax",
+            "fee": "Fee",
+            "net_amount": "Net",
+            "net_usd": "Net USD",
+            "announcement_payment_date": "Pay Date",
+            "created_by": "By",
+        }
+    )
+    styled = view.style.format(
+        {
+            "Shares": "{:,.0f}",
+            "DPS": "{:,.4f}",
+            "Gross": "{:,.2f}",
+            "Tax": "{:,.2f}",
+            "Fee": "{:,.2f}",
+            "Net": "{:,.2f}",
+            "Net USD": "${:,.2f}",
+        },
+        na_rep="-",
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=min(520, 42 + 34 * len(view)))
+
+
 def render_stock_detail(portfolio: dict[str, Any]) -> None:
     symbols = [p["symbol"] for p in portfolio["projects"]]
     if not symbols:
@@ -2282,18 +2546,20 @@ def main() -> None:
         st.warning("Cloud ledger is not configured. This run uses local fallback data; sharing needs Apps Script or Google Sheets secrets.")
     trades = load_trades()
     portfolio = compute_portfolio_from_trades(trades)
-    tabs = st.tabs(["Overview", "Trade Entry", "Stock Detail", "Risk Assessment", "Indexes & Macro", "Records"])
+    tabs = st.tabs(["Overview", "Trade Entry", "Dividends", "Stock Detail", "Risk Assessment", "Indexes & Macro", "Records"])
     with tabs[0]:
         render_overview(portfolio)
     with tabs[1]:
         render_trade_entry(role, user)
     with tabs[2]:
-        render_stock_detail(portfolio)
+        render_dividends(portfolio, role, user)
     with tabs[3]:
-        render_risk_assessment(portfolio)
+        render_stock_detail(portfolio)
     with tabs[4]:
-        render_macro_indexes(portfolio)
+        render_risk_assessment(portfolio)
     with tabs[5]:
+        render_macro_indexes(portfolio)
+    with tabs[6]:
         render_admin(role, portfolio)
 
 

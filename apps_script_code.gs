@@ -2,6 +2,7 @@ const SHEET_ID = '1a9ahW9brvGS6B2QMDgUwRQmLRXiHDKecX4G-oZ8acFQ';
 const TRADES_SHEET = 'Trades';
 const AUDIT_SHEET = 'Audit Log';
 const OPTION_OI_SHEET = 'Option OI History';
+const DIVIDEND_SHEET = 'Dividend Records';
 
 const TRADE_HEADERS = [
   'id',
@@ -45,6 +46,29 @@ const OPTION_OI_HEADERS = [
   'nearest_max_put_oi',
   'source',
   'timestamp'
+];
+
+const DIVIDEND_HEADERS = [
+  'id',
+  'date',
+  'symbol',
+  'shares',
+  'dividend_per_share',
+  'currency',
+  'gross_amount',
+  'tax_rate',
+  'tax_amount',
+  'fee',
+  'net_amount',
+  'fx_to_usd',
+  'net_usd',
+  'announcement_ex_date',
+  'announcement_record_date',
+  'announcement_payment_date',
+  'announcement_note',
+  'source',
+  'created_by',
+  'created_at'
 ];
 
 function ok(payload) {
@@ -139,6 +163,8 @@ function doGet() {
   try {
     getSheet(TRADES_SHEET, TRADE_HEADERS);
     getSheet(AUDIT_SHEET, AUDIT_HEADERS);
+    getSheet(OPTION_OI_SHEET, OPTION_OI_HEADERS);
+    getSheet(DIVIDEND_SHEET, DIVIDEND_HEADERS);
     return ok({ message: 'Equity PnL Apps Script is ready.' });
   } catch (err) {
     return fail(err);
@@ -155,6 +181,7 @@ function doPost(e) {
       getSheet(TRADES_SHEET, TRADE_HEADERS);
       getSheet(AUDIT_SHEET, AUDIT_HEADERS);
       getSheet(OPTION_OI_SHEET, OPTION_OI_HEADERS);
+      getSheet(DIVIDEND_SHEET, DIVIDEND_HEADERS);
       return ok({ message: 'Sheets are ready.' });
     }
 
@@ -170,6 +197,10 @@ function doPost(e) {
       return ok({ rows: readRows(OPTION_OI_SHEET, OPTION_OI_HEADERS) });
     }
 
+    if (action === 'read_dividend_records') {
+      return ok({ rows: readRows(DIVIDEND_SHEET, DIVIDEND_HEADERS) });
+    }
+
     if (action === 'append_trade') {
       appendRow(TRADES_SHEET, TRADE_HEADERS, body.trade || {});
       if (body.audit) {
@@ -181,6 +212,11 @@ function doPost(e) {
     if (action === 'upsert_option_oi_history') {
       upsertOptionOiHistory(body.row || {});
       return ok({ message: 'Option OI history upserted.' });
+    }
+
+    if (action === 'append_dividend_record') {
+      appendRow(DIVIDEND_SHEET, DIVIDEND_HEADERS, body.record || {});
+      return ok({ message: 'Dividend record appended.' });
     }
 
     throw new Error(`Unknown action: ${action}`);
