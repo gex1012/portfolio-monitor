@@ -791,9 +791,18 @@ def parse_trade_text(raw: str, user: str) -> dict[str, Any]:
             symbol = ticker
             break
     if not symbol:
-        ticker_match = re.search(r"\b([A-Za-z.]{1,8}|\d{3,6})\b", text)
-        if ticker_match:
-            symbol = ticker_match.group(1).upper()
+        stop_words = {"BUY", "SELL", "BOUGHT", "SOLD", "SHARE", "SHARES", "AT", "PRICE"}
+        alpha_tokens = re.findall(r"(?<![A-Za-z])([A-Za-z][A-Za-z.]{0,7})(?![A-Za-z])", text)
+        for token in alpha_tokens:
+            candidate = token.upper().strip(".")
+            if candidate and candidate not in stop_words:
+                symbol = candidate
+                break
+    if not symbol:
+        without_price = re.sub(r"(?:@|at|价格|price)\s*[0-9]+(?:\.[0-9]+)?", " ", text, flags=re.I)
+        numeric_match = re.search(r"\b(\d{3,6})\b", without_price)
+        if numeric_match:
+            symbol = numeric_match.group(1).upper()
     if not symbol:
         raise ValueError("没有识别到股票代码或名称")
     quote = core.latest_quote(symbol)
