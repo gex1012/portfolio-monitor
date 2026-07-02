@@ -250,6 +250,22 @@ function doPost(e) {
       return ok({ message: 'Trade appended.' });
     }
 
+    if (action === 'update_trade') {
+      updateRowById(TRADES_SHEET, TRADE_HEADERS, body.trade || {});
+      if (body.audit) {
+        appendRow(AUDIT_SHEET, AUDIT_HEADERS, body.audit);
+      }
+      return ok({ message: 'Trade updated.' });
+    }
+
+    if (action === 'delete_trade') {
+      deleteRowById(TRADES_SHEET, TRADE_HEADERS, body.id || '');
+      if (body.audit) {
+        appendRow(AUDIT_SHEET, AUDIT_HEADERS, body.audit);
+      }
+      return ok({ message: 'Trade deleted.' });
+    }
+
     if (action === 'upsert_option_oi_history') {
       upsertOptionOiHistory(body.row || {});
       return ok({ message: 'Option OI history upserted.' });

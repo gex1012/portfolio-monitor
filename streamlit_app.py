@@ -21,6 +21,7 @@ import streamlit.components.v1 as components
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 LOCAL_TRADES_PATH = DATA_DIR / "streamlit_trades.json"
+LOCAL_TRADE_DELETED_PATH = DATA_DIR / "streamlit_deleted_trade_ids.json"
 LOCAL_OPTION_OI_PATH = DATA_DIR / "option_oi_history.json"
 LOCAL_DIVIDEND_PATH = DATA_DIR / "dividend_records.json"
 LOCAL_DIVIDEND_DELETED_PATH = DATA_DIR / "dividend_deleted_ids.json"
@@ -231,11 +232,51 @@ def load_local_rows() -> list[dict[str, Any]]:
         return []
 
 
+def load_local_trade_deleted_ids() -> set[str]:
+    if not LOCAL_TRADE_DELETED_PATH.exists():
+        return set()
+    try:
+        data = json.loads(LOCAL_TRADE_DELETED_PATH.read_text(encoding="utf-8"))
+        return {clean_text(x) for x in data if clean_text(x)} if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+
+def save_local_trade_deleted_ids(ids: set[str]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_TRADE_DELETED_PATH.write_text(json.dumps(sorted(ids), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def append_local_row(row: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     rows = load_local_rows()
     rows.append(row)
     LOCAL_TRADES_PATH.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def upsert_local_trade(row: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    trade = normalize_trade(row)
+    rows = load_local_rows()
+    found = False
+    for idx, existing in enumerate(rows):
+        if clean_text(existing.get("id")) == clean_text(trade.get("id")):
+            rows[idx] = trade
+            found = True
+            break
+    if not found:
+        rows.append(trade)
+    LOCAL_TRADES_PATH.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def delete_local_trade(trade_id: str) -> None:
+    target = clean_text(trade_id)
+    rows = [row for row in load_local_rows() if clean_text(row.get("id")) != target]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_TRADES_PATH.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    deleted_ids = load_local_trade_deleted_ids()
+    deleted_ids.add(target)
+    save_local_trade_deleted_ids(deleted_ids)
 
 
 def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
@@ -264,18 +305,30 @@ def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def merge_trade_rows(base_rows: list[dict[str, Any]], local_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deleted_ids = load_local_trade_deleted_ids()
+    merged: dict[str, dict[str, Any]] = {}
+    for row in base_rows + local_rows:
+        trade = normalize_trade(row)
+        trade_id = clean_text(trade.get("id"))
+        if trade_id and trade_id not in deleted_ids:
+            merged[trade_id] = trade
+    return list(merged.values())
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def load_trades_cached(cache_key: str) -> list[dict[str, Any]]:
     if apps_script_enabled():
         rows = apps_script_call("read_trades").get("rows", [])
-        return [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
+        cloud_rows = [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
+        return merge_trade_rows(cloud_rows, load_local_rows())
     if google_sheet_enabled():
         rows = read_sheet_rows(str(secret_value("google_sheets", "trades_worksheet", default="Trades")), TRADE_HEADERS)
-        return [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
+        sheet_rows = [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
+        return merge_trade_rows(sheet_rows, load_local_rows())
     initial = core.excel_transactions()
     rows = initial.get("transactions", []) if initial.get("ok") else []
-    rows.extend(load_local_rows())
-    return [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
+    return merge_trade_rows([row for row in rows if clean_text(row.get("symbol"))], load_local_rows())
 
 
 def load_trades() -> list[dict[str, Any]]:
@@ -310,6 +363,72 @@ def append_trade(row: dict[str, Any]) -> None:
     else:
         append_local_row(trade)
     load_trades_cached.clear()
+
+
+def update_trade_record(row: dict[str, Any], user: str) -> str:
+    trade = normalize_trade(row)
+    audit = {
+        "timestamp": now_iso(),
+        "user": user,
+        "action": "UPDATE_TRADE",
+        "symbol": trade["fmp_symbol"],
+        "side": trade["side"],
+        "quantity": trade["quantity"],
+        "price": trade["price"],
+        "note": f"Updated trade {trade['id']}: {trade['note']}",
+    }
+    if apps_script_enabled():
+        try:
+            apps_script_call("update_trade", {"trade": trade, "audit": audit})
+            load_trades_cached.clear()
+            return "cloud"
+        except Exception as exc:
+            upsert_local_trade(trade)
+            load_trades_cached.clear()
+            return f"local_fallback:{exc}"
+    if google_sheet_enabled():
+        try:
+            raise RuntimeError("Direct Google Sheets update is not enabled in this local mode.")
+        except Exception as exc:
+            upsert_local_trade(trade)
+            load_trades_cached.clear()
+            return f"local_fallback:{exc}"
+    upsert_local_trade(trade)
+    load_trades_cached.clear()
+    return "local"
+
+
+def delete_trade_record(trade_id: str, trade: dict[str, Any], user: str) -> str:
+    target = clean_text(trade_id)
+    audit = {
+        "timestamp": now_iso(),
+        "user": user,
+        "action": "DELETE_TRADE",
+        "symbol": clean_text(trade.get("fmp_symbol") or trade.get("symbol")),
+        "side": clean_text(trade.get("side")),
+        "quantity": to_float(trade.get("quantity")),
+        "price": to_float(trade.get("price")),
+        "note": f"Deleted trade {target}: {clean_text(trade.get('note'))}",
+    }
+    if apps_script_enabled():
+        try:
+            apps_script_call("delete_trade", {"id": target, "audit": audit})
+            load_trades_cached.clear()
+            return "cloud"
+        except Exception as exc:
+            delete_local_trade(target)
+            load_trades_cached.clear()
+            return f"local_fallback:{exc}"
+    if google_sheet_enabled():
+        try:
+            raise RuntimeError("Direct Google Sheets delete is not enabled in this local mode.")
+        except Exception as exc:
+            delete_local_trade(target)
+            load_trades_cached.clear()
+            return f"local_fallback:{exc}"
+    delete_local_trade(target)
+    load_trades_cached.clear()
+    return "local"
 
 
 def load_audit() -> list[dict[str, Any]]:
@@ -1794,6 +1913,116 @@ def render_overview(portfolio: dict[str, Any]) -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True, height=min(560, 42 + 36 * len(view)))
 
 
+def render_trade_record_manager(role: str, user: str) -> None:
+    if role not in {"editor", "admin"}:
+        return
+    st.markdown("#### Edit / Delete Existing Trade")
+    trades = pd.DataFrame(load_trades())
+    if trades.empty:
+        st.info("No trade records available.")
+        return
+    trades["date_dt"] = pd.to_datetime(trades["date"], errors="coerce")
+    today = dt.date.today()
+    min_date = trades["date_dt"].dropna().dt.date.min() if trades["date_dt"].notna().any() else today
+    max_date = trades["date_dt"].dropna().dt.date.max() if trades["date_dt"].notna().any() else today
+    f1, f2, f3 = st.columns([1, 1, 1.2])
+    start_date = f1.date_input("From date", value=min_date, key="trade_edit_start")
+    end_date = f2.date_input("To date", value=max_date, key="trade_edit_end")
+    symbol_query = f3.text_input("Stock filter", placeholder="AMAT / 0650.HK", key="trade_edit_symbol").strip().upper()
+
+    filtered = trades.copy()
+    if start_date:
+        filtered = filtered[filtered["date_dt"].isna() | (filtered["date_dt"].dt.date >= start_date)]
+    if end_date:
+        filtered = filtered[filtered["date_dt"].isna() | (filtered["date_dt"].dt.date <= end_date)]
+    if symbol_query:
+        filtered = filtered[
+            filtered["symbol"].astype(str).str.upper().str.contains(symbol_query, regex=False)
+            | filtered["fmp_symbol"].astype(str).str.upper().str.contains(symbol_query, regex=False)
+        ]
+    filtered = filtered.sort_values(["date_dt", "created_at"], ascending=[False, False]).head(200)
+    if filtered.empty:
+        st.info("No matching trades.")
+        return
+
+    records = filtered.to_dict("records")
+    labels = [
+        f"{clean_text(row.get('date'))[:10] or '-'} | {clean_text(row.get('side'))} | "
+        f"{clean_text(row.get('fmp_symbol'))} | {to_float(row.get('quantity')):,.0f} @ {to_float(row.get('price')):,.2f} | "
+        f"{clean_text(row.get('id'))[-8:]}"
+        for row in records
+    ]
+    selected_label = st.selectbox("Select trade", labels, key="trade_edit_select")
+    edit_row = dict(records[labels.index(selected_label)])
+    edit_id = clean_text(edit_row.get("id"))
+
+    c1, c2, c3, c4 = st.columns(4)
+    try:
+        edit_date_default = pd.to_datetime(edit_row.get("date"), errors="coerce").date()
+    except Exception:
+        edit_date_default = today
+    edit_date = c1.date_input("Trade date", value=edit_date_default, key=f"edit_trade_date_{edit_id}")
+    side_options = ["BUY", "SELL"]
+    side_value = clean_text(edit_row.get("side")).upper()
+    side_idx = side_options.index(side_value) if side_value in side_options else 0
+    edit_side = c2.selectbox("Side", side_options, index=side_idx, key=f"edit_trade_side_{edit_id}")
+    edit_symbol = c3.text_input("Symbol", value=clean_text(edit_row.get("symbol")), key=f"edit_trade_symbol_{edit_id}")
+    edit_fmp_symbol = c4.text_input("FMP symbol", value=clean_text(edit_row.get("fmp_symbol")), key=f"edit_trade_fmp_{edit_id}")
+
+    c5, c6, c7, c8 = st.columns(4)
+    edit_qty = c5.number_input("Quantity", min_value=0.0, value=float(to_float(edit_row.get("quantity"))), step=1.0, key=f"edit_trade_qty_{edit_id}")
+    edit_price = c6.number_input("Price", min_value=0.0, value=float(to_float(edit_row.get("price"))), step=0.01, key=f"edit_trade_price_{edit_id}")
+    currency_options = ["USD", "HKD", "CNY", "EUR", "GBP", "JPY", "SGD"]
+    current_currency = clean_text(edit_row.get("currency")).upper() or core.infer_currency(edit_symbol)
+    currency_idx = currency_options.index(current_currency) if current_currency in currency_options else 0
+    edit_currency = c7.selectbox("Currency", currency_options, index=currency_idx, key=f"edit_trade_currency_{edit_id}")
+    edit_fee = c8.number_input("Fee", min_value=0.0, value=float(to_float(edit_row.get("fee"))), step=0.01, key=f"edit_trade_fee_{edit_id}")
+    edit_note = st.text_input("Note", value=clean_text(edit_row.get("note")), key=f"edit_trade_note_{edit_id}")
+
+    estimated_fee = core.calculated_fee(edit_symbol or edit_fmp_symbol, edit_qty, edit_price, edit_currency)
+    notional = edit_qty * edit_price
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Notional", currency_amount(notional, edit_currency))
+    s2.metric("Current fee", currency_amount(edit_fee, edit_currency))
+    s3.metric("Auto fee reference", currency_amount(estimated_fee, edit_currency))
+
+    b1, b2, b3 = st.columns([1, 1, 1])
+    if b1.button("Use auto fee", key=f"use_auto_fee_{edit_id}"):
+        st.session_state[f"edit_trade_fee_{edit_id}"] = float(estimated_fee)
+        st.rerun()
+    if b2.button("Save edited trade", type="primary", key=f"save_trade_{edit_id}"):
+        updated = {
+            **edit_row,
+            "id": edit_id,
+            "date": edit_date.isoformat(),
+            "side": edit_side,
+            "symbol": edit_symbol,
+            "fmp_symbol": edit_fmp_symbol or core.fmp_symbol(edit_symbol),
+            "name": edit_fmp_symbol or edit_symbol,
+            "quantity": edit_qty,
+            "price": edit_price,
+            "currency": edit_currency,
+            "fee": edit_fee,
+            "note": edit_note,
+            "source": "streamlit_trade_edit",
+            "created_by": user,
+        }
+        result = update_trade_record(updated, user)
+        if result.startswith("local_fallback:"):
+            st.warning("Trade edit saved locally. Cloud update needs the latest Apps Script deployment.")
+        else:
+            st.success("Trade updated.")
+        st.rerun()
+    confirm_delete = b3.checkbox("Confirm delete", key=f"confirm_delete_trade_{edit_id}")
+    if b3.button("Delete trade", disabled=not confirm_delete, key=f"delete_trade_{edit_id}"):
+        result = delete_trade_record(edit_id, edit_row, user)
+        if result.startswith("local_fallback:"):
+            st.warning("Trade hidden locally. Cloud delete needs the latest Apps Script deployment.")
+        else:
+            st.success("Trade deleted.")
+        st.rerun()
+
+
 def render_trade_entry(role: str, user: str) -> None:
     st.subheader("Trade Entry")
     if role not in {"editor", "admin"}:
@@ -1844,6 +2073,7 @@ def render_trade_entry(role: str, user: str) -> None:
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+    render_trade_record_manager(role, user)
 
 
 def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
