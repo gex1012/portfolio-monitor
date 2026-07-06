@@ -2872,10 +2872,10 @@ def risk_history(symbols: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
 
 def returns_from_history(rows: list[dict[str, Any]], suffix: str) -> pd.DataFrame:
     if not rows:
-        return pd.DataFrame(columns=["date", suffix])
+        return pd.DataFrame({"date": pd.Series(dtype="datetime64[ns]"), suffix: pd.Series(dtype="float64")})
     frame = pd.DataFrame(rows)
     if "date" not in frame.columns or "close" not in frame.columns:
-        return pd.DataFrame(columns=["date", suffix])
+        return pd.DataFrame({"date": pd.Series(dtype="datetime64[ns]"), suffix: pd.Series(dtype="float64")})
     frame = frame[["date", "close"]].copy()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
@@ -3024,7 +3024,12 @@ def build_risk_assessment(portfolio: dict[str, Any]) -> dict[str, Any]:
 
     sp = returns_from_history(histories.get("^GSPC", []), "SPX")
     nq = returns_from_history(histories.get("^NDX", []), "NDX")
-    benchmark = returns.reset_index().merge(sp, on="date", how="inner").merge(nq, on="date", how="inner")
+    returns_for_merge = returns.reset_index()
+    returns_for_merge["date"] = pd.to_datetime(returns_for_merge["date"], errors="coerce")
+    if sp.empty or nq.empty:
+        benchmark = pd.DataFrame()
+    else:
+        benchmark = returns_for_merge.merge(sp, on="date", how="inner").merge(nq, on="date", how="inner")
     betas: dict[str, float | None] = {}
     corr_sp: dict[str, float | None] = {}
     corr_nq: dict[str, float | None] = {}
