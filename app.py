@@ -586,7 +586,65 @@ def quote_for_symbols(symbols: list[str]) -> dict[str, Any]:
             yq = yahoo_quote(symbol)
             if yq:
                 result[symbol.upper()] = yq
+    for symbol in clean:
+        if is_hk_symbol(symbol) and (symbol.upper() not in result or not to_number(result.get(symbol.upper(), {}).get("price"))):
+            public_quote = hk_public_quote(symbol)
+            if public_quote:
+                result[symbol.upper()] = public_quote
     return result
+
+
+def is_hk_symbol(symbol: str) -> bool:
+    return str(symbol or "").upper().endswith(".HK")
+
+
+def hk_public_code(symbol: str) -> str:
+    base = str(symbol or "").upper().replace(".HK", "")
+    digits = re.sub(r"\D", "", base)
+    return f"hk{digits.zfill(5)}" if digits else ""
+
+
+def hk_public_quote(symbol: str) -> dict[str, Any]:
+    code = hk_public_code(symbol)
+    if not code:
+        return {}
+    url = f"https://qt.gtimg.cn/q={code}"
+    cached = CACHE.get(url)
+    if cached and time.time() - cached[0] < 45:
+        return cached[1]
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 EquityPnLMonitor/1.0", "Referer": "https://gu.qq.com/"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            text = response.read().decode("gbk", errors="ignore")
+    except Exception:
+        return {}
+    match = re.search(r'="([^"]+)"', text)
+    if not match:
+        return {}
+    parts = match.group(1).split("~")
+    if len(parts) < 35:
+        return {}
+    last = to_number(parts[3])
+    previous = to_number(parts[4])
+    if last <= 0:
+        return {}
+    data = {
+        "symbol": symbol.upper(),
+        "name": parts[46] if len(parts) > 46 and parts[46] else parts[1],
+        "price": last,
+        "previousClose": previous,
+        "open": to_number(parts[5]),
+        "change": to_number(parts[31]) if len(parts) > 31 else last - previous,
+        "changePercentage": to_number(parts[32]) if len(parts) > 32 else ((last / previous - 1) * 100 if previous else 0),
+        "changesPercentage": to_number(parts[32]) if len(parts) > 32 else ((last / previous - 1) * 100 if previous else 0),
+        "dayHigh": to_number(parts[33]) if len(parts) > 33 else 0,
+        "dayLow": to_number(parts[34]) if len(parts) > 34 else 0,
+        "volume": to_number(parts[6]),
+        "currency": "HKD",
+        "source": "Tencent public HK quote",
+    }
+    CACHE[url] = (time.time(), data)
+    return data
 
 
 def yahoo_chart(symbol: str, range_text: str = "1y") -> dict[str, Any] | None:
@@ -648,6 +706,39 @@ def yahoo_history(symbol: str, range_text: str = "1y") -> list[dict[str, Any]]:
                 "volume": to_number(quote.get("volume", [0] * len(timestamps))[idx]),
             }
         )
+    return rows
+
+
+def hk_public_history(symbol: str, count: int = 320) -> list[dict[str, Any]]:
+    code = hk_public_code(symbol)
+    if not code:
+        return []
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param={code},day,,,{int(count)}"
+    cached = CACHE.get(url)
+    if cached and time.time() - cached[0] < 900:
+        return cached[1]
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 EquityPnLMonitor/1.0", "Referer": f"https://gu.qq.com/{code}"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+    day_rows = data.get("data", {}).get(code, {}).get("day", [])
+    rows = []
+    for item in day_rows:
+        if len(item) < 6:
+            continue
+        rows.append(
+            {
+                "date": item[0],
+                "open": to_number(item[1]),
+                "close": to_number(item[2]),
+                "high": to_number(item[3]),
+                "low": to_number(item[4]),
+                "volume": to_number(item[5]),
+            }
+        )
+    CACHE[url] = (time.time(), rows)
     return rows
 
 
@@ -830,6 +921,10 @@ def historical_prices(symbol: str) -> list[dict[str, Any]]:
     sym = fmp_symbol(symbol)
     if sym.startswith("^"):
         return yahoo_history(sym, "1y")[-260:]
+    if is_hk_symbol(sym):
+        hk_rows = hk_public_history(sym, 320)
+        if hk_rows:
+            return hk_rows[-260:]
     start = (dt.date.today() - dt.timedelta(days=420)).isoformat()
     data = fmp_get("/stable/historical-price-eod/full", {"symbol": sym, "from": start}, ttl=900)
     if isinstance(data, list):
@@ -839,7 +934,12 @@ def historical_prices(symbol: str) -> list[dict[str, Any]]:
             for r in rows
             if r.get("date")
         ]
-    return yahoo_history(sym, "1y")[-260:]
+    yahoo_rows = yahoo_history(sym, "1y")[-260:]
+    if yahoo_rows:
+        return yahoo_rows
+    if is_hk_symbol(sym):
+        return hk_public_history(sym, 320)[-260:]
+    return []
 
 
 def sma(values: list[float], window: int) -> list[float | None]:
