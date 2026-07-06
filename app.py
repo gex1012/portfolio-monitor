@@ -574,6 +574,14 @@ def quote_for_symbols(symbols: list[str]) -> dict[str, Any]:
             for item in data:
                 result[str(item.get("symbol", "")).upper()] = item
     for symbol in clean:
+        if symbol.upper() in result and to_number(result.get(symbol.upper(), {}).get("price")):
+            continue
+        data = fmp_get("/stable/quote", {"symbol": symbol}, ttl=45)
+        if isinstance(data, list) and data:
+            item = data[0]
+            if to_number(item.get("price")):
+                result[symbol.upper()] = item
+    for symbol in clean:
         if symbol.upper() not in result or not to_number(result.get(symbol.upper(), {}).get("price")):
             yq = yahoo_quote(symbol)
             if yq:
