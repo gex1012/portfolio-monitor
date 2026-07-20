@@ -3264,12 +3264,32 @@ def render_admin(role: str, portfolio: dict[str, Any]) -> None:
             st.dataframe(audit.sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
 
 
+def clear_data_caches() -> None:
+    for cached_func in [
+        load_trades_cached,
+        load_dividend_records_cached,
+        load_option_oi_history_cached,
+        risk_history,
+    ]:
+        try:
+            cached_func.clear()
+        except Exception:
+            pass
+
+
 def main() -> None:
     inject_styles()
     role, user = login_gate()
     st.title("Equity PnL Monitor")
     if not cloud_ledger_enabled():
         st.warning("Cloud ledger is not configured. This run uses local fallback data; sharing needs Apps Script or Google Sheets secrets.")
+    if role in {"editor", "admin"}:
+        c1, c2 = st.columns([1, 5])
+        if c1.button("Refresh data", help="Clear cached cloud ledger data and reload Google Sheet / Apps Script rows."):
+            clear_data_caches()
+            st.toast("Cloud data cache cleared. Reloading latest rows.")
+            st.rerun()
+        c2.caption("If you edited Google Sheet directly, click Refresh data to reload trades immediately.")
     trades = load_trades()
     portfolio = compute_portfolio_from_trades(trades)
     tabs = st.tabs(["Overview", "Trade Entry", "Dividends", "Stock Detail", "Risk Assessment", "Indexes & Macro", "Records"])
