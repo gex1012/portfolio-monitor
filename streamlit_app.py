@@ -327,12 +327,10 @@ def merge_trade_rows(base_rows: list[dict[str, Any]], local_rows: list[dict[str,
 def load_trades_cached(cache_key: str) -> list[dict[str, Any]]:
     if apps_script_enabled():
         rows = apps_script_call("read_trades").get("rows", [])
-        cloud_rows = [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
-        return merge_trade_rows(cloud_rows, load_local_rows())
+        return [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
     if google_sheet_enabled():
         rows = read_sheet_rows(str(secret_value("google_sheets", "trades_worksheet", default="Trades")), TRADE_HEADERS)
-        sheet_rows = [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
-        return merge_trade_rows(sheet_rows, load_local_rows())
+        return [normalize_trade(row) for row in rows if clean_text(row.get("symbol"))]
     initial = core.excel_transactions()
     rows = initial.get("transactions", []) if initial.get("ok") else []
     return merge_trade_rows([row for row in rows if clean_text(row.get("symbol"))], load_local_rows())
