@@ -204,6 +204,9 @@ def fmp_symbol(raw_symbol: str) -> str:
     symbol = clean_symbol(raw_symbol)
     if not symbol:
         return symbol
+    hk_match = re.fullmatch(r"(\d{1,5})\.HK", symbol)
+    if hk_match:
+        return str(int(hk_match.group(1))).zfill(4) + ".HK"
     if re.fullmatch(r"\d{1,5}", symbol):
         return str(int(symbol)).zfill(4) + ".HK"
     if re.fullmatch(r"\d{6}", symbol):
@@ -240,6 +243,11 @@ def fee_rate_for_trade(symbol: str, currency: str, exchange: str | None = None) 
 
 def calculated_fee(symbol: str, quantity: float, price: float, currency: str, exchange: str | None = None) -> float:
     return abs(quantity * price) * fee_rate_for_trade(symbol, currency, exchange)
+
+
+def symbol_from_note(note: Any) -> str:
+    matches = re.findall(r"\b(\d{3,5})(?:\.HK)?\b", str(note or ""), flags=re.I)
+    return matches[-1].upper() if matches else ""
 
 
 def parse_side(value: Any, amount: float, quantity: float) -> str:
@@ -414,6 +422,8 @@ def save_ledger(rows: list[dict[str, Any]]) -> None:
 
 def normalize_trade(payload: dict[str, Any]) -> dict[str, Any]:
     symbol = clean_symbol(payload.get("symbol"))
+    if symbol in {"LOT", "LOTS", "SHARE", "SHARES"}:
+        symbol = symbol_from_note(payload.get("note")) or symbol
     if not symbol:
         raise ValueError("symbol is required")
     qty = abs(to_number(payload.get("quantity")))
@@ -474,6 +484,15 @@ SYMBOL_ALIASES = {
 }
 
 
+SYMBOL_ALIASES.update(
+    {
+        "\u4e2d\u56fd\u6d77\u6d0b\u77f3\u6cb9": "0883",
+        "\u4e2d\u6d77\u6cb9": "0883",
+        "cnooc": "0883",
+    }
+)
+
+
 def search_symbol(query: str) -> str | None:
     q = query.strip()
     if not q:
@@ -490,8 +509,11 @@ def search_symbol(query: str) -> str | None:
 
 
 def latest_quote(symbol: str) -> dict[str, Any]:
-    data = fmp_get("/stable/quote", {"symbol": fmp_symbol(symbol)}, ttl=45)
-    return data[0] if isinstance(data, list) and data else {}
+    sym = fmp_symbol(symbol)
+    data = fmp_get("/stable/quote", {"symbol": sym}, ttl=45)
+    if isinstance(data, list) and data and to_number(data[0].get("price")):
+        return data[0]
+    return quote_for_symbols([sym]).get(sym.upper(), {})
 
 
 def parse_trade_text(text: str) -> dict[str, Any]:
@@ -506,11 +528,12 @@ def parse_trade_text(text: str) -> dict[str, Any]:
         raise ValueError("没有识别到数量，比如：买100股 英伟达")
     price_match = re.search(r"(?:@|at|价格|价|price)\s*([0-9]+(?:\.[0-9]+)?)", raw, re.I)
     explicit_price = to_number(price_match.group(1)) if price_match else 0.0
+    numeric_symbol_matches = re.findall(r"\b(\d{3,5})(?:\.HK)?\b", raw, flags=re.I)
     cleaned = re.sub(r"买入|买|卖出|卖|沽|减仓|清仓|buy|sell|bought|sold", " ", raw, flags=re.I)
     cleaned = re.sub(r"\d+(?:\.\d+)?\s*(?:股|shares?|share|手)?", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"(?:@|at|价格|价|price)\s*[0-9]+(?:\.[0-9]+)?", " ", cleaned, flags=re.I)
     words = [w.strip(" ，,。") for w in cleaned.split() if w.strip(" ，,。")]
-    symbol_query = words[-1] if words else ""
+    symbol_query = numeric_symbol_matches[-1] if numeric_symbol_matches else (words[-1] if words else "")
     symbol = search_symbol(symbol_query)
     if not symbol:
         raise ValueError("没有识别到股票代码或名称")

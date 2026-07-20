@@ -281,7 +281,14 @@ def delete_local_trade(trade_id: str) -> None:
 
 def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
     symbol = clean_text(row.get("symbol"))
-    fmp_symbol = clean_text(row.get("fmp_symbol")) or core.fmp_symbol(symbol)
+    if symbol.upper() in {"LOT", "LOTS", "SHARE", "SHARES"}:
+        note_symbols = re.findall(r"\b(\d{3,5})(?:\.HK)?\b", clean_text(row.get("note")), flags=re.I)
+        if note_symbols:
+            symbol = note_symbols[-1].upper()
+    raw_fmp_symbol = clean_text(row.get("fmp_symbol"))
+    if raw_fmp_symbol.upper() in {"LOT", "LOTS", "SHARE", "SHARES"}:
+        raw_fmp_symbol = ""
+    fmp_symbol = core.fmp_symbol(raw_fmp_symbol or symbol)
     currency = clean_text(row.get("currency")) or core.infer_currency(symbol)
     side = clean_text(row.get("side")).upper() or "BUY"
     qty = abs(to_float(row.get("quantity")))
@@ -892,6 +899,15 @@ ALIASES = {
 }
 
 
+ALIASES.update(
+    {
+        "\u4e2d\u56fd\u6d77\u6d0b\u77f3\u6cb9": "0883",
+        "\u4e2d\u6d77\u6cb9": "0883",
+        "cnooc": "0883",
+    }
+)
+
+
 def parse_trade_text(raw: str, user: str) -> dict[str, Any]:
     text = raw.strip()
     if not text:
@@ -905,12 +921,15 @@ def parse_trade_text(raw: str, user: str) -> dict[str, Any]:
     price_match = re.search(r"(?:@|at|价格|price)\s*([0-9]+(?:\.[0-9]+)?)", text, re.I)
     explicit_price = to_float(price_match.group(1)) if price_match else 0.0
     symbol = ""
+    numeric_symbol_matches = re.findall(r"\b(\d{3,5})(?:\.HK)?\b", text, flags=re.I)
     for name, ticker in ALIASES.items():
         if name.lower() in lower:
             symbol = ticker
             break
+    if not symbol and numeric_symbol_matches:
+        symbol = numeric_symbol_matches[-1].upper()
     if not symbol:
-        stop_words = {"BUY", "SELL", "BOUGHT", "SOLD", "SHARE", "SHARES", "AT", "PRICE"}
+        stop_words = {"BUY", "SELL", "BOUGHT", "SOLD", "SHARE", "SHARES", "LOT", "LOTS", "AT", "PRICE"}
         alpha_tokens = re.findall(r"(?<![A-Za-z])([A-Za-z][A-Za-z.]{0,7})(?![A-Za-z])", text)
         for token in alpha_tokens:
             candidate = token.upper().strip(".")
