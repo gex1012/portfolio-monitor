@@ -161,16 +161,33 @@ def apps_script_call(action: str, payload: dict[str, Any] | None = None) -> dict
         headers={"Content-Type": "application/json; charset=utf-8", "User-Agent": "EquityPnLMonitor/1.0"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = ""
+    last_error: Exception | None = None
+    for attempt in range(2):
         try:
-            detail = exc.read().decode("utf-8")[:500]
-        except Exception:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
             detail = ""
-        raise RuntimeError(f"Apps Script HTTP {exc.code} while running {action}. {detail}") from exc
+            try:
+                detail = exc.read().decode("utf-8")[:500]
+            except Exception:
+                detail = ""
+            raise RuntimeError(f"Apps Script HTTP {exc.code} while running {action}. {detail}") from exc
+        except TimeoutError as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
+            raise RuntimeError("Apps Script read timed out after retry.") from exc
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if attempt == 0 and "timed out" in str(exc).lower():
+                time.sleep(1.0)
+                continue
+            raise
+    else:
+        raise RuntimeError(f"Apps Script request failed: {last_error}")
     if not data.get("ok"):
         raise RuntimeError(str(data.get("error") or f"Apps Script action failed: {action}"))
     return data
