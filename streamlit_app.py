@@ -25,6 +25,9 @@ LOCAL_TRADE_DELETED_PATH = DATA_DIR / "streamlit_deleted_trade_ids.json"
 LOCAL_OPTION_OI_PATH = DATA_DIR / "option_oi_history.json"
 LOCAL_DIVIDEND_PATH = DATA_DIR / "dividend_records.json"
 LOCAL_DIVIDEND_DELETED_PATH = DATA_DIR / "dividend_deleted_ids.json"
+BROKERS = ["国投", "浙商"]
+DEFAULT_BROKER = "国投"
+BROKER_BASE_HKD = {"国投": 4_000_000.0, "浙商": 4_000_000.0}
 TRADE_HEADERS = [
     "id",
     "date",
@@ -40,6 +43,7 @@ TRADE_HEADERS = [
     "source",
     "created_by",
     "created_at",
+    "broker",
 ]
 AUDIT_HEADERS = ["timestamp", "user", "action", "symbol", "side", "quantity", "price", "note"]
 OPTION_OI_HEADERS = [
@@ -289,6 +293,9 @@ def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
     if raw_fmp_symbol.upper() in {"LOT", "LOTS", "SHARE", "SHARES"}:
         raw_fmp_symbol = ""
     fmp_symbol = core.fmp_symbol(raw_fmp_symbol or symbol)
+    broker = clean_text(row.get("broker")) or DEFAULT_BROKER
+    if broker not in BROKERS:
+        broker = DEFAULT_BROKER
     currency = clean_text(row.get("currency")) or core.infer_currency(symbol)
     side = clean_text(row.get("side")).upper() or "BUY"
     qty = abs(to_float(row.get("quantity")))
@@ -301,6 +308,7 @@ def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
         "symbol": symbol,
         "fmp_symbol": fmp_symbol,
         "name": clean_text(row.get("name")) or symbol,
+        "broker": broker,
         "quantity": qty,
         "price": price,
         "currency": currency,
@@ -756,15 +764,31 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
     positions: dict[str, dict[str, Any]] = {}
     realized_rows: list[dict[str, Any]] = []
     realized_total_usd = 0.0
+    broker_stats: dict[str, dict[str, float]] = {
+        broker: {
+            "base_hkd": BROKER_BASE_HKD.get(broker, 4_000_000.0),
+            "base_usd": BROKER_BASE_HKD.get(broker, 4_000_000.0) * fx.get("HKD", 1 / 7.8),
+            "market_value_usd": 0.0,
+            "realized_pnl_usd": 0.0,
+            "unrealized_pnl_usd": 0.0,
+            "total_pnl_usd": 0.0,
+            "equity_usd": BROKER_BASE_HKD.get(broker, 4_000_000.0) * fx.get("HKD", 1 / 7.8),
+            "active_project_count": 0.0,
+        }
+        for broker in BROKERS
+    }
 
     for t in txs:
         symbol = t["fmp_symbol"]
+        broker = t.get("broker") if t.get("broker") in BROKERS else DEFAULT_BROKER
+        position_key = f"{broker}|{symbol}"
         pos = positions.setdefault(
-            symbol,
+            position_key,
             {
                 "symbol": symbol,
                 "raw_symbol": t["symbol"],
                 "name": t.get("name") or symbol,
+                "broker": broker,
                 "currency": t["currency"],
                 "quantity": 0.0,
                 "cost": 0.0,
@@ -791,10 +815,13 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
                 pos["cost"] -= avg_cost * sell_qty
             realized_usd = pnl * fx.get(pos["currency"], 1.0)
             realized_total_usd += realized_usd
+            broker_stats.setdefault(broker, {}).setdefault("realized_pnl_usd", 0.0)
+            broker_stats[broker]["realized_pnl_usd"] += realized_usd
             realized_rows.append(
                 {
                     "date": t.get("date"),
                     "symbol": symbol,
+                    "broker": broker,
                     "quantity": qty,
                     "price": price,
                     "avg_cost": avg_cost,
@@ -812,17 +839,21 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
     nq_ytd = period_return_ytd("^NDX")
     sp_ytd = period_return_ytd("^GSPC")
     for symbol, pos in positions.items():
+        display_symbol = pos["symbol"]
+        broker = pos.get("broker") if pos.get("broker") in BROKERS else DEFAULT_BROKER
         qty = pos["quantity"]
-        quote = quotes.get(symbol.upper(), {})
+        quote = quotes.get(display_symbol.upper(), {})
         last = to_float(quote.get("price")) or to_float(quote.get("previousClose")) or (pos["cost"] / qty if qty else 0)
         avg_cost = pos["cost"] / qty if qty else 0.0
         rate = fx.get(pos["currency"], 1.0)
-        stock_ret = core.period_return(symbol, 20)
-        stock_ytd = period_return_ytd(symbol)
+        stock_ret = core.period_return(display_symbol, 20)
+        stock_ytd = period_return_ytd(display_symbol)
         market_value_usd = qty * last * rate
         unrealized_usd = ((last - avg_cost) * qty if qty else 0.0) * rate
         market_value_total_usd += market_value_usd
         unrealized_total_usd += unrealized_usd
+        broker_stats[broker]["market_value_usd"] += market_value_usd
+        broker_stats[broker]["unrealized_pnl_usd"] += unrealized_usd
         projects.append(
             {
                 **pos,
@@ -844,7 +875,14 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
         )
     projects.sort(key=lambda x: (x["status"] != "active", -abs(x["market_value_usd"]), x["symbol"]))
     holdings = [p for p in projects if p["status"] == "active"]
-    base_hkd = float(core.CONFIG.get("account_base_hkd", 4_000_000))
+    for holding in holdings:
+        broker = holding.get("broker") if holding.get("broker") in BROKERS else DEFAULT_BROKER
+        broker_stats[broker]["active_project_count"] += 1
+    for broker, stats in broker_stats.items():
+        stats["total_pnl_usd"] = stats.get("realized_pnl_usd", 0.0) + stats.get("unrealized_pnl_usd", 0.0)
+        stats["equity_usd"] = stats.get("base_usd", 0.0) + stats["total_pnl_usd"]
+        stats["total_pnl_pct"] = stats["total_pnl_usd"] / stats.get("base_usd", 1.0) if stats.get("base_usd") else 0.0
+    base_hkd = sum(BROKER_BASE_HKD.get(broker, 4_000_000.0) for broker in BROKERS)
     base_usd = base_hkd * fx.get("HKD", 1 / 7.8)
     dividend_rows = load_dividend_records()
     dividend_total_usd = sum(to_float(row.get("net_usd")) for row in dividend_rows)
@@ -865,6 +903,7 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
             "active_project_count": len(holdings),
             "closed_project_count": len(projects) - len(holdings),
         },
+        "broker_accounts": broker_stats,
         "holdings": holdings,
         "projects": projects,
         "realized": realized_rows[-250:],
@@ -906,7 +945,7 @@ ALIASES.update(
 )
 
 
-def parse_trade_text(raw: str, user: str) -> dict[str, Any]:
+def parse_trade_text(raw: str, user: str, broker: str = DEFAULT_BROKER) -> dict[str, Any]:
     text = raw.strip()
     if not text:
         raise ValueError("请输入交易描述")
@@ -955,6 +994,7 @@ def parse_trade_text(raw: str, user: str) -> dict[str, Any]:
             "price": price,
             "currency": currency,
             "fee": fee,
+            "broker": broker if broker in BROKERS else DEFAULT_BROKER,
             "note": f"Parsed from: {text}",
             "created_by": user,
             "source": "streamlit_natural_language",
@@ -1845,6 +1885,44 @@ def render_overview(portfolio: dict[str, Any]) -> None:
         f"Spot FX used: USD/HKD {to_float(spot.get('USDHKD')):.4f} | "
         f"HKD/USD {to_float(to_usd.get('HKD')):.5f} | CNY/USD {to_float(to_usd.get('CNY')):.5f}"
     )
+    broker_accounts = portfolio.get("broker_accounts", {})
+    if broker_accounts:
+        st.markdown("#### Broker PnL")
+        broker_rows = []
+        for broker in BROKERS:
+            item = broker_accounts.get(broker, {})
+            broker_rows.append(
+                {
+                    "Broker": broker,
+                    "Base": item.get("base_usd", 0),
+                    "Equity": item.get("equity_usd", 0),
+                    "Market Value": item.get("market_value_usd", 0),
+                    "Trading Realized": item.get("realized_pnl_usd", 0),
+                    "Unrealized": item.get("unrealized_pnl_usd", 0),
+                    "Total PnL": item.get("total_pnl_usd", 0),
+                    "PnL %": item.get("total_pnl_pct", 0),
+                    "Active Names": int(item.get("active_project_count", 0)),
+                }
+            )
+        broker_view = pd.DataFrame(broker_rows)
+        broker_styled = broker_view.style.format(
+            {
+                "Base": "${:,.0f}",
+                "Equity": "${:,.0f}",
+                "Market Value": "${:,.0f}",
+                "Trading Realized": "${:,.0f}",
+                "Unrealized": "${:,.0f}",
+                "Total PnL": "${:,.0f}",
+                "PnL %": "{:+.2%}",
+                "Active Names": "{:,.0f}",
+            }
+        )
+        signed_broker_cols = ["Trading Realized", "Unrealized", "Total PnL", "PnL %"]
+        if hasattr(broker_styled, "map"):
+            broker_styled = broker_styled.map(color_signed, subset=signed_broker_cols)
+        else:
+            broker_styled = broker_styled.applymap(color_signed, subset=signed_broker_cols)
+        st.dataframe(broker_styled, use_container_width=True, hide_index=True, height=112)
     st.subheader("Index Tape")
     render_index_strip()
     render_holding_date_alerts(portfolio)
@@ -1871,6 +1949,7 @@ def render_overview(portfolio: dict[str, Any]) -> None:
     )
     view = holdings[
         [
+            "broker",
             "symbol",
             "quantity",
             "avg_cost",
@@ -1885,6 +1964,7 @@ def render_overview(portfolio: dict[str, Any]) -> None:
         ]
     ].rename(
         columns={
+            "broker": "Broker",
             "symbol": "Symbol",
             "quantity": "Qty",
             "avg_cost": "Avg Cost",
@@ -1900,6 +1980,7 @@ def render_overview(portfolio: dict[str, Any]) -> None:
     )
     styled = view.style.format(
         {
+            "Broker": "{}",
             "Qty": "{:,.0f}",
             "Avg Cost": "{:,.2f}",
             "Last": "{:,.2f}",
@@ -1965,7 +2046,7 @@ def render_trade_record_manager(role: str, user: str) -> None:
     records = filtered.to_dict("records")
     labels = [
         f"{clean_text(row.get('date'))[:10] or '-'} | {clean_text(row.get('side'))} | "
-        f"{clean_text(row.get('fmp_symbol'))} | {to_float(row.get('quantity')):,.0f} @ {to_float(row.get('price')):,.2f} | "
+        f"{clean_text(row.get('broker')) or DEFAULT_BROKER} | {clean_text(row.get('fmp_symbol'))} | {to_float(row.get('quantity')):,.0f} @ {to_float(row.get('price')):,.2f} | "
         f"{clean_text(row.get('id'))[-8:]}"
         for row in records
     ]
@@ -1994,6 +2075,9 @@ def render_trade_record_manager(role: str, user: str) -> None:
     currency_idx = currency_options.index(current_currency) if current_currency in currency_options else 0
     edit_currency = c7.selectbox("Currency", currency_options, index=currency_idx, key=f"edit_trade_currency_{edit_id}")
     edit_fee = c8.number_input("Fee", min_value=0.0, value=float(to_float(edit_row.get("fee"))), step=0.01, key=f"edit_trade_fee_{edit_id}")
+    current_broker = clean_text(edit_row.get("broker")) or DEFAULT_BROKER
+    broker_idx = BROKERS.index(current_broker) if current_broker in BROKERS else 0
+    edit_broker = st.selectbox("Broker", BROKERS, index=broker_idx, key=f"edit_trade_broker_{edit_id}")
     edit_note = st.text_input("Note", value=clean_text(edit_row.get("note")), key=f"edit_trade_note_{edit_id}")
 
     estimated_fee = core.calculated_fee(edit_symbol or edit_fmp_symbol, edit_qty, edit_price, edit_currency)
@@ -2020,6 +2104,7 @@ def render_trade_record_manager(role: str, user: str) -> None:
             "price": edit_price,
             "currency": edit_currency,
             "fee": edit_fee,
+            "broker": edit_broker,
             "note": edit_note,
             "source": "streamlit_trade_edit",
             "created_by": user,
@@ -2047,12 +2132,13 @@ def render_trade_entry(role: str, user: str) -> None:
         return
     with st.form("natural_trade"):
         text = st.text_input("Natural language", placeholder="例：买100股 英伟达 / sell 20 NVDA @ 150")
+        natural_broker = st.selectbox("Broker", BROKERS, index=0, key="natural_trade_broker")
         submitted = st.form_submit_button("Parse and save", type="primary")
     if submitted:
         try:
-            trade = parse_trade_text(text, user)
+            trade = parse_trade_text(text, user, natural_broker)
             append_trade(trade)
-            st.success(f"Saved {trade['side']} {trade['quantity']} {trade['fmp_symbol']} @ {trade['price']:.2f}; fee {trade['fee']:.2f}")
+            st.success(f"Saved {trade['broker']} {trade['side']} {trade['quantity']} {trade['fmp_symbol']} @ {trade['price']:.2f}; fee {trade['fee']:.2f}")
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
@@ -2064,10 +2150,11 @@ def render_trade_entry(role: str, user: str) -> None:
             symbol = c2.text_input("Symbol", placeholder="NVDA / 0700")
             qty = c3.number_input("Qty", min_value=0.0, step=1.0)
             price = c4.number_input("Price", min_value=0.0, step=0.01)
-            c5, c6, c7 = st.columns(3)
+            c5, c6, c7, c8 = st.columns(4)
             currency = c5.selectbox("Currency", ["", "USD", "HKD", "CNY"])
             fee = c6.number_input("Fee, blank/0 = auto", min_value=0.0, step=0.01)
             date = c7.date_input("Date", value=dt.date.today())
+            broker = c8.selectbox("Broker", BROKERS, index=0, key="manual_trade_broker")
             note = st.text_input("Note")
             ok = st.form_submit_button("Save manual trade")
         if ok:
@@ -2080,6 +2167,7 @@ def render_trade_entry(role: str, user: str) -> None:
                         "price": price,
                         "currency": currency or core.infer_currency(symbol),
                         "fee": fee,
+                        "broker": broker,
                         "date": date.isoformat(),
                         "note": note,
                         "created_by": user,

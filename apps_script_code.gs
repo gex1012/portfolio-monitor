@@ -18,7 +18,8 @@ const TRADE_HEADERS = [
   'note',
   'source',
   'created_by',
-  'created_at'
+  'created_at',
+  'broker'
 ];
 
 const AUDIT_HEADERS = [
