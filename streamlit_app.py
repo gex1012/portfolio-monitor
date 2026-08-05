@@ -3111,6 +3111,22 @@ def build_risk_assessment(portfolio: dict[str, Any]) -> dict[str, Any]:
     if holdings.empty:
         return {"ok": False, "note": "No active holdings."}
     holdings = holdings.copy()
+    for col in ["market_value_usd", "unrealized_pnl_usd"]:
+        if col not in holdings.columns:
+            holdings[col] = 0.0
+        holdings[col] = pd.to_numeric(holdings[col], errors="coerce").fillna(0.0)
+    # Risk is measured at ticker exposure level. The same stock can now appear
+    # in multiple broker accounts, so aggregate before using symbols as labels.
+    holdings = (
+        holdings.groupby("symbol", as_index=False)
+        .agg(
+            market_value_usd=("market_value_usd", "sum"),
+            unrealized_pnl_usd=("unrealized_pnl_usd", "sum"),
+        )
+    )
+    holdings = holdings[holdings["market_value_usd"] > 0].copy()
+    if holdings.empty:
+        return {"ok": False, "note": "No positive active holdings."}
     holdings["weight"] = holdings["market_value_usd"] / max(1, holdings["market_value_usd"].sum())
     symbols = tuple(sorted(holdings["symbol"].astype(str).unique()))
     histories = risk_history(symbols + ("^GSPC", "^NDX"))
