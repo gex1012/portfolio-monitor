@@ -27,7 +27,7 @@ LOCAL_DIVIDEND_PATH = DATA_DIR / "dividend_records.json"
 LOCAL_DIVIDEND_DELETED_PATH = DATA_DIR / "dividend_deleted_ids.json"
 BROKERS = ["国投", "浙商"]
 DEFAULT_BROKER = "国投"
-BROKER_BASE_HKD = {"国投": 4_000_000.0, "浙商": 4_000_000.0}
+BROKER_BASE_HKD = {"国投": 4_000_000.0, "浙商": 2_000_000.0}
 TRADE_HEADERS = [
     "id",
     "date",
