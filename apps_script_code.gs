@@ -69,7 +69,8 @@ const DIVIDEND_HEADERS = [
   'announcement_note',
   'source',
   'created_by',
-  'created_at'
+  'created_at',
+  'broker'
 ];
 
 function ok(payload) {
@@ -105,6 +106,12 @@ function getSheet(name, headers) {
   if (!hasHeader) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     sheet.setFrozenRows(1);
+  } else {
+    const needsHeaderRefresh = headers.some((header, i) => String(firstRow[i] || '').trim() !== header);
+    if (needsHeaderRefresh) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      sheet.setFrozenRows(1);
+    }
   }
   return sheet;
 }

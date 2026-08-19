@@ -82,6 +82,7 @@ DIVIDEND_HEADERS = [
     "source",
     "created_by",
     "created_at",
+    "broker",
 ]
 
 
@@ -483,6 +484,9 @@ def normalize_dividend_row(row: dict[str, Any]) -> dict[str, Any]:
     clean["id"] = clean_text(clean.get("id")) or f"div-{int(time.time() * 1000)}"
     clean["date"] = clean_text(clean.get("date")) or dt.date.today().isoformat()
     clean["symbol"] = clean_text(clean.get("symbol")).upper()
+    clean["broker"] = clean_text(clean.get("broker")) or DEFAULT_BROKER
+    if clean["broker"] not in BROKERS:
+        clean["broker"] = DEFAULT_BROKER
     clean["currency"] = clean_text(clean.get("currency")).upper() or "USD"
     clean["source"] = clean_text(clean.get("source")) or "manual"
     clean["created_by"] = clean_text(clean.get("created_by")) or "unknown"
@@ -582,6 +586,10 @@ def is_duplicate_dividend(record: dict[str, Any], rows: list[dict[str, Any]]) ->
         if clean_text(row.get("date")) != clean_text(record.get("date")):
             continue
         if clean_text(row.get("symbol")).upper() != clean_text(record.get("symbol")).upper():
+            continue
+        row_broker = clean_text(row.get("broker")) or DEFAULT_BROKER
+        record_broker = clean_text(record.get("broker")) or DEFAULT_BROKER
+        if row_broker != record_broker:
             continue
         if clean_text(row.get("currency")).upper() != clean_text(record.get("currency")).upper():
             continue
@@ -895,14 +903,21 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
     for holding in holdings:
         broker = holding.get("broker") if holding.get("broker") in BROKERS else DEFAULT_BROKER
         broker_stats[broker]["active_project_count"] += 1
-    for broker, stats in broker_stats.items():
-        stats["total_pnl_usd"] = stats.get("realized_pnl_usd", 0.0) + stats.get("unrealized_pnl_usd", 0.0)
-        stats["equity_usd"] = stats.get("base_usd", 0.0) + stats["total_pnl_usd"]
-        stats["total_pnl_pct"] = stats["total_pnl_usd"] / stats.get("base_usd", 1.0) if stats.get("base_usd") else 0.0
     base_hkd = sum(BROKER_BASE_HKD.get(broker, 4_000_000.0) for broker in BROKERS)
     base_usd = base_hkd * fx.get("HKD", 1 / 7.8)
     dividend_rows = load_dividend_records()
     dividend_total_usd = sum(to_float(row.get("net_usd")) for row in dividend_rows)
+    for row in dividend_rows:
+        broker = clean_text(row.get("broker")) or DEFAULT_BROKER
+        if broker not in BROKERS:
+            broker = DEFAULT_BROKER
+        broker_stats.setdefault(broker, {}).setdefault("dividend_pnl_usd", 0.0)
+        broker_stats[broker]["dividend_pnl_usd"] += to_float(row.get("net_usd"))
+    for broker, stats in broker_stats.items():
+        stats["realized_with_dividend_usd"] = stats.get("realized_pnl_usd", 0.0) + stats.get("dividend_pnl_usd", 0.0)
+        stats["total_pnl_usd"] = stats["realized_with_dividend_usd"] + stats.get("unrealized_pnl_usd", 0.0)
+        stats["equity_usd"] = stats.get("base_usd", 0.0) + stats["total_pnl_usd"]
+        stats["total_pnl_pct"] = stats["total_pnl_usd"] / stats.get("base_usd", 1.0) if stats.get("base_usd") else 0.0
     realized_with_dividend_usd = realized_total_usd + dividend_total_usd
     total_pnl_usd = realized_with_dividend_usd + unrealized_total_usd
     return {
@@ -1915,6 +1930,7 @@ def render_overview(portfolio: dict[str, Any]) -> None:
                     "Equity": item.get("equity_usd", 0),
                     "Market Value": item.get("market_value_usd", 0),
                     "Trading Realized": item.get("realized_pnl_usd", 0),
+                    "Dividend PnL": item.get("dividend_pnl_usd", 0),
                     "Unrealized": item.get("unrealized_pnl_usd", 0),
                     "Total PnL": item.get("total_pnl_usd", 0),
                     "PnL %": item.get("total_pnl_pct", 0),
@@ -1928,13 +1944,14 @@ def render_overview(portfolio: dict[str, Any]) -> None:
                 "Equity": "${:,.0f}",
                 "Market Value": "${:,.0f}",
                 "Trading Realized": "${:,.0f}",
+                "Dividend PnL": "${:,.0f}",
                 "Unrealized": "${:,.0f}",
                 "Total PnL": "${:,.0f}",
                 "PnL %": "{:+.2%}",
                 "Active Names": "{:,.0f}",
             }
         )
-        signed_broker_cols = ["Trading Realized", "Unrealized", "Total PnL", "PnL %"]
+        signed_broker_cols = ["Trading Realized", "Dividend PnL", "Unrealized", "Total PnL", "PnL %"]
         if hasattr(broker_styled, "map"):
             broker_styled = broker_styled.map(color_signed, subset=signed_broker_cols)
         else:
@@ -2200,15 +2217,33 @@ def render_trade_entry(role: str, user: str) -> None:
 
 def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
     st.subheader("Dividends")
-    holdings = pd.DataFrame(portfolio.get("holdings", []))
-    if holdings.empty:
-        st.info("No active holdings. Dividend input is limited to current holdings.")
+    projects = pd.DataFrame(portfolio.get("projects", []))
+    if projects.empty:
+        st.info("No trade history yet. Dividend input needs at least one traded stock.")
         return
-    holdings = holdings.sort_values("symbol").copy()
-    symbols = holdings["symbol"].astype(str).tolist()
-    selected = st.selectbox("Holding stock", symbols)
-    holding = holdings[holdings["symbol"] == selected].iloc[0]
-    default_currency = clean_text(holding.get("currency")) or core.infer_currency(selected)
+    projects = projects.copy()
+    projects["broker"] = projects.get("broker", DEFAULT_BROKER)
+    projects["broker"] = projects["broker"].apply(lambda x: x if x in BROKERS else DEFAULT_BROKER)
+    targets = (
+        projects.sort_values(["broker", "symbol", "status"])
+        .drop_duplicates(["broker", "symbol"], keep="first")
+        .copy()
+    )
+    targets["label"] = targets.apply(
+        lambda row: (
+            f"{clean_text(row.get('broker'))} | {clean_text(row.get('symbol'))}"
+            f" | {clean_text(row.get('status')) or '-'}"
+            f" | qty {to_float(row.get('quantity')):,.0f}"
+        ),
+        axis=1,
+    )
+    selected_label = st.selectbox("Dividend stock / account", targets["label"].astype(str).tolist())
+    target = targets[targets["label"] == selected_label].iloc[0]
+    selected = clean_text(target.get("symbol"))
+    selected_broker = clean_text(target.get("broker")) or DEFAULT_BROKER
+    if selected_broker not in BROKERS:
+        selected_broker = DEFAULT_BROKER
+    default_currency = clean_text(target.get("currency")) or core.infer_currency(selected)
     announcement = dividend_announcement_for_symbol(selected)
     fx = portfolio.get("fx", {}).get("to_usd", {})
 
@@ -2233,19 +2268,21 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     pay_date = c1.date_input("Dividend date", value=dt.date.today())
-    shares = c2.number_input("Shares", min_value=0.0, value=float(to_float(holding.get("quantity"))), step=1.0)
+    shares = c2.number_input("Shares", min_value=0.0, value=float(max(0.0, to_float(target.get("quantity")))), step=1.0)
     dps = c3.number_input("Dividend / share", min_value=0.0, value=float(announced_dps), step=0.0001, format="%.4f")
     currency_options = ["USD", "HKD", "CNY", "EUR", "GBP", "JPY", "SGD"]
     default_idx = currency_options.index(default_currency) if default_currency in currency_options else 0
     currency = c4.selectbox("Currency symbol", currency_options, index=default_idx)
 
     gross = shares * dps
-    c5, c6, c7, c8 = st.columns(4)
+    broker_idx = BROKERS.index(selected_broker) if selected_broker in BROKERS else 0
+    c5, c6, c7, c8, c9 = st.columns(5)
     default_tax_rate = 0.30 if currency == "USD" and not selected.endswith(".HK") else 0.0
     tax_rate = c5.number_input("Tax rate", min_value=0.0, max_value=1.0, value=float(default_tax_rate), step=0.01, format="%.2f")
     tax_amount = c6.number_input("Tax amount", min_value=0.0, value=float(gross * tax_rate), step=0.01)
     fee = c7.number_input("Dividend fee", min_value=0.0, value=0.0, step=0.01)
     fx_to_usd = c8.number_input("FX to USD", min_value=0.0, value=float(fx.get(currency, 1.0)), step=0.0001, format="%.5f")
+    dividend_broker = c9.selectbox("Broker", BROKERS, index=broker_idx, key="dividend_input_broker")
     net = max(0.0, gross - tax_amount - fee)
     net_usd = net * fx_to_usd
 
@@ -2268,6 +2305,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
                 {
                     "date": pay_date.isoformat(),
                     "symbol": selected,
+                    "broker": dividend_broker,
                     "shares": shares,
                     "dividend_per_share": dps,
                     "currency": currency,
@@ -2307,6 +2345,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
     view = records[
         [
             "date",
+            "broker",
             "symbol",
             "shares",
             "dividend_per_share",
@@ -2322,6 +2361,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
     ].rename(
         columns={
             "date": "Date",
+            "broker": "Broker",
             "symbol": "Symbol",
             "shares": "Shares",
             "dividend_per_share": "DPS",
@@ -2354,7 +2394,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
     st.markdown("#### Edit / Delete Dividend Record")
     editable_records = records.to_dict("records")
     labels = [
-        f"{clean_text(row.get('date'))} | {clean_text(row.get('symbol'))} | "
+        f"{clean_text(row.get('date'))} | {clean_text(row.get('broker')) or DEFAULT_BROKER} | {clean_text(row.get('symbol'))} | "
         f"{currency_amount(row.get('net_amount'), clean_text(row.get('currency')))} | {clean_text(row.get('id'))[-8:]}"
         for row in editable_records
     ]
@@ -2368,6 +2408,9 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
     except Exception:
         edit_date_default = dt.date.today()
     edit_date = e1.date_input("Edit date", value=edit_date_default, key=f"edit_div_date_{edit_id}")
+    edit_broker_default = clean_text(edit_row.get("broker")) or DEFAULT_BROKER
+    edit_broker_idx = BROKERS.index(edit_broker_default) if edit_broker_default in BROKERS else 0
+    edit_broker = e2.selectbox("Broker", BROKERS, index=edit_broker_idx, key=f"edit_div_broker_{edit_id}")
     edit_symbol = e2.text_input("Symbol", value=clean_text(edit_row.get("symbol")), disabled=True, key=f"edit_div_symbol_{edit_id}")
     edit_shares = e3.number_input("Shares", min_value=0.0, value=float(to_float(edit_row.get("shares"))), step=1.0, key=f"edit_div_shares_{edit_id}")
     edit_dps = e4.number_input(
@@ -2428,6 +2471,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
             "id": edit_id,
             "date": edit_date.isoformat(),
             "symbol": edit_symbol,
+            "broker": edit_broker,
             "shares": edit_shares,
             "dividend_per_share": edit_dps,
             "currency": edit_currency,
