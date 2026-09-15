@@ -746,9 +746,21 @@ def hk_public_history(symbol: str, count: int = 320) -> list[dict[str, Any]]:
             data = json.loads(response.read().decode("utf-8"))
     except Exception:
         return []
-    day_rows = data.get("data", {}).get(code, {}).get("day", [])
+    if not isinstance(data, dict):
+        return []
+    data_section = data.get("data")
+    if not isinstance(data_section, dict):
+        return []
+    code_section = data_section.get(code)
+    if not isinstance(code_section, dict):
+        return []
+    day_rows = code_section.get("day", [])
+    if not isinstance(day_rows, list):
+        return []
     rows = []
     for item in day_rows:
+        if not isinstance(item, (list, tuple)):
+            continue
         if len(item) < 6:
             continue
         rows.append(
