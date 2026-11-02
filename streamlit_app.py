@@ -318,7 +318,10 @@ def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
     side = clean_text(row.get("side")).upper() or "BUY"
     qty = abs(to_float(row.get("quantity")))
     price = to_float(row.get("price"))
-    fee = abs(to_float(row.get("fee"))) or core.calculated_fee(symbol, qty, price, currency)
+    fee = abs(to_float(row.get("fee"))) or core.calculated_fee(
+        fmp_symbol, qty, price, currency, broker=broker, side=side,
+        trade_date=clean_text(row.get("date")) or dt.date.today().isoformat(),
+    )
     return {
         "id": clean_text(row.get("id")) or f"trade-{int(time.time() * 1000)}",
         "date": clean_text(row.get("date")) or dt.date.today().isoformat(),
@@ -1017,7 +1020,7 @@ def parse_trade_text(raw: str, user: str, broker: str = DEFAULT_BROKER) -> dict[
     if price <= 0:
         raise ValueError(f"没有拿到 {symbol} 实时价格，请手动输入价格")
     currency = core.infer_currency(symbol)
-    fee = core.calculated_fee(symbol, qty, price, currency)
+    fee = core.calculated_fee(symbol, qty, price, currency, broker=broker, side=side, trade_date=dt.date.today())
     return normalize_trade(
         {
             "side": side,
@@ -2114,7 +2117,8 @@ def render_trade_record_manager(role: str, user: str) -> None:
     edit_broker = st.selectbox("Broker", BROKERS, index=broker_idx, key=f"edit_trade_broker_{edit_id}")
     edit_note = st.text_input("Note", value=clean_text(edit_row.get("note")), key=f"edit_trade_note_{edit_id}")
 
-    estimated_fee = core.calculated_fee(edit_symbol or edit_fmp_symbol, edit_qty, edit_price, edit_currency)
+    estimated_fee = core.calculated_fee(edit_fmp_symbol or edit_symbol, edit_qty, edit_price, edit_currency,
+                                       broker=edit_broker, side=edit_side, trade_date=edit_date)
     notional = edit_qty * edit_price
     s1, s2, s3 = st.columns(3)
     s1.metric("Notional", currency_amount(notional, edit_currency))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 import json
 import math
 import os
@@ -241,7 +242,30 @@ def fee_rate_for_trade(symbol: str, currency: str, exchange: str | None = None) 
     return 0.002
 
 
-def calculated_fee(symbol: str, quantity: float, price: float, currency: str, exchange: str | None = None) -> float:
+def zheshang_us_fee(quantity: float, price: float, side: str, trade_date: Any) -> dict[str, float]:
+    timestamp = pd.to_datetime(trade_date, errors="raise")
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert("Asia/Hong_Kong")
+    day = timestamp.date()
+    qty = Decimal(str(abs(quantity)))
+    notional = qty * Decimal(str(abs(price)))
+    cent = Decimal("0.01")
+    commission = max(Decimal("2"), qty * Decimal("0.008")).quantize(cent, rounding=ROUND_HALF_UP)
+    sec = taf = Decimal("0")
+    if str(side).upper().startswith("S") and qty > 0:
+        sec_rate = Decimal("0.0000206") if day >= dt.date(2026, 4, 4) else Decimal("0")
+        sec = (notional * sec_rate).quantize(cent, rounding=ROUND_CEILING)
+        if not dt.date(2026, 10, 1) <= day <= dt.date(2026, 12, 31):
+            taf_rate = Decimal("0.000195") if day.year >= 2026 else Decimal("0.000166")
+            taf_cap = Decimal("9.79") if day.year >= 2026 else Decimal("8.30")
+            taf = min(taf_cap, max(cent, qty * taf_rate)).quantize(cent, rounding=ROUND_CEILING)
+    return {"commission": float(commission), "sec": float(sec), "taf": float(taf), "total": float(commission + sec + taf)}
+
+
+def calculated_fee(symbol: str, quantity: float, price: float, currency: str, exchange: str | None = None,
+                   *, broker: str = "", side: str = "BUY", trade_date: Any = None) -> float:
+    if broker == "浙商" and currency.upper() == "USD" and not is_hk_symbol(symbol):
+        return zheshang_us_fee(quantity, price, side, trade_date or dt.date.today())["total"]
     return abs(quantity * price) * fee_rate_for_trade(symbol, currency, exchange)
 
 
@@ -451,7 +475,11 @@ def normalize_trade(payload: dict[str, Any]) -> dict[str, Any]:
         "side": side,
         "quantity": qty,
         "price": price,
-        "fee": abs(to_number(payload.get("fee"))) or calculated_fee(symbol, qty, price, currency, payload.get("exchange")),
+        "fee": abs(to_number(payload.get("fee"))) or calculated_fee(
+            symbol, qty, price, currency, payload.get("exchange"),
+            broker=str(payload.get("broker") or ""), side=side, trade_date=trade_date,
+        ),
+        "broker": str(payload.get("broker") or "国投"),
         "currency": currency,
         "note": str(payload.get("note") or ""),
         "created_at": utc_now().isoformat(),
