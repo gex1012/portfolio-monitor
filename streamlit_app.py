@@ -163,7 +163,8 @@ def apps_script_call(action: str, payload: dict[str, Any] | None = None) -> dict
         method="POST",
     )
     last_error: Exception | None = None
-    for attempt in range(2):
+    attempts = 2 if action.startswith("read_") else 1
+    for attempt in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=60) as response:
                 data = json.loads(response.read().decode("utf-8"))
@@ -177,13 +178,13 @@ def apps_script_call(action: str, payload: dict[str, Any] | None = None) -> dict
             raise RuntimeError(f"Apps Script HTTP {exc.code} while running {action}. {detail}") from exc
         except TimeoutError as exc:
             last_error = exc
-            if attempt == 0:
+            if attempt + 1 < attempts:
                 time.sleep(1.0)
                 continue
-            raise RuntimeError("Apps Script read timed out after retry.") from exc
+            raise RuntimeError(f"Apps Script request timed out while running {action}.") from exc
         except urllib.error.URLError as exc:
             last_error = exc
-            if attempt == 0 and "timed out" in str(exc).lower():
+            if attempt + 1 < attempts and "timed out" in str(exc).lower():
                 time.sleep(1.0)
                 continue
             raise
@@ -390,6 +391,16 @@ def append_trade(row: dict[str, Any]) -> None:
         "note": trade["note"],
     }
     if apps_script_enabled():
+        # A retry after a lost response must not append the same confirmed trade twice.
+        existing = apps_script_call("read_trades").get("rows", [])
+        for row in existing:
+            if clean_text(row.get("id")) == trade["id"]:
+                saved = normalize_trade(row)
+                fields = ["side", "fmp_symbol", "broker", "quantity", "price", "currency", "fee"]
+                if any(saved[key] != trade[key] for key in fields):
+                    raise ValueError("Trade ID already exists with different details. Refresh records before saving.")
+                load_trades_cached.clear()
+                return
         apps_script_call("append_trade", {"trade": trade, "audit": audit})
     elif google_sheet_enabled():
         append_sheet_row(str(secret_value("google_sheets", "trades_worksheet", default="Trades")), TRADE_HEADERS, trade)
@@ -487,11 +498,14 @@ def normalize_dividend_row(row: dict[str, Any]) -> dict[str, Any]:
     clean["id"] = clean_text(clean.get("id")) or f"div-{int(time.time() * 1000)}"
     clean["date"] = clean_text(clean.get("date")) or dt.date.today().isoformat()
     clean["symbol"] = clean_text(clean.get("symbol")).upper()
-    clean["broker"] = clean_text(clean.get("broker")) or DEFAULT_BROKER
+    # Older Apps Script deployments omit the broker column; retain it in source too.
+    source_broker = re.search(r"(?:^|\|)broker=([^|]+)", clean_text(clean.get("source")))
+    clean["broker"] = clean_text(clean.get("broker")) or (source_broker.group(1) if source_broker else DEFAULT_BROKER)
     if clean["broker"] not in BROKERS:
         clean["broker"] = DEFAULT_BROKER
     clean["currency"] = clean_text(clean.get("currency")).upper() or "USD"
-    clean["source"] = clean_text(clean.get("source")) or "manual"
+    source = clean_text(clean.get("source")).split("|broker=", 1)[0] or "manual"
+    clean["source"] = f"{source}|broker={clean['broker']}"
     clean["created_by"] = clean_text(clean.get("created_by")) or "unknown"
     clean["created_at"] = clean_text(clean.get("created_at")) or now_iso()
     for key in ["shares", "dividend_per_share", "gross_amount", "tax_rate", "tax_amount", "fee", "net_amount", "fx_to_usd", "net_usd"]:
@@ -993,7 +1007,9 @@ def parse_trade_text(raw: str, user: str, broker: str = DEFAULT_BROKER) -> dict[
     price_match = re.search(r"(?:@|at|价格|price)\s*([0-9]+(?:\.[0-9]+)?)", text, re.I)
     explicit_price = to_float(price_match.group(1)) if price_match else 0.0
     symbol = ""
-    numeric_symbol_matches = re.findall(r"\b(\d{3,5})(?:\.HK)?\b", text, flags=re.I)
+    symbol_text = text[:qty_match.start()] + text[qty_match.end():]
+    symbol_text = re.sub(r"(?:@|at|价格|price)\s*[0-9]+(?:\.[0-9]+)?", " ", symbol_text, flags=re.I)
+    numeric_symbol_matches = re.findall(r"\b(\d{3,5})(?:\.HK)?\b", symbol_text, flags=re.I)
     for name, ticker in ALIASES.items():
         if name.lower() in lower:
             symbol = ticker
@@ -1002,20 +1018,19 @@ def parse_trade_text(raw: str, user: str, broker: str = DEFAULT_BROKER) -> dict[
         symbol = numeric_symbol_matches[-1].upper()
     if not symbol:
         stop_words = {"BUY", "SELL", "BOUGHT", "SOLD", "SHARE", "SHARES", "LOT", "LOTS", "AT", "PRICE"}
-        alpha_tokens = re.findall(r"(?<![A-Za-z])([A-Za-z][A-Za-z.]{0,7})(?![A-Za-z])", text)
+        alpha_tokens = re.findall(r"(?<![A-Za-z])([A-Za-z][A-Za-z.]{0,7})(?![A-Za-z])", symbol_text)
         for token in alpha_tokens:
             candidate = token.upper().strip(".")
             if candidate and candidate not in stop_words:
                 symbol = candidate
                 break
     if not symbol:
-        without_price = re.sub(r"(?:@|at|价格|price)\s*[0-9]+(?:\.[0-9]+)?", " ", text, flags=re.I)
-        numeric_match = re.search(r"\b(\d{3,6})\b", without_price)
+        numeric_match = re.search(r"\b(\d{3,6})\b", symbol_text)
         if numeric_match:
             symbol = numeric_match.group(1).upper()
     if not symbol:
         raise ValueError("没有识别到股票代码或名称")
-    quote = core.latest_quote(symbol)
+    quote = core.latest_quote(symbol) if not explicit_price else {}
     price = explicit_price or to_float(quote.get("price"))
     if price <= 0:
         raise ValueError(f"没有拿到 {symbol} 实时价格，请手动输入价格")
@@ -2147,12 +2162,10 @@ def render_trade_record_manager(role: str, user: str) -> None:
             "source": "streamlit_trade_edit",
             "created_by": user,
         }
-        result = update_trade_record(updated, user)
-        if result.startswith("local_fallback:"):
-            st.warning("Trade edit saved locally. Cloud update needs the latest Apps Script deployment.")
-        else:
-            st.success("Trade updated.")
-        st.rerun()
+        try:
+            stage_trade_confirmation(updated, user, mode="update", auto_fee=False)
+        except ValueError as exc:
+            st.error(str(exc))
     confirm_delete = b3.checkbox("Confirm delete", key=f"confirm_delete_trade_{edit_id}")
     if b3.button("Delete trade", disabled=not confirm_delete, key=f"delete_trade_{edit_id}"):
         result = delete_trade_record(edit_id, edit_row, user)
@@ -2163,21 +2176,87 @@ def render_trade_record_manager(role: str, user: str) -> None:
         st.rerun()
 
 
+def stage_trade_confirmation(row: dict[str, Any], user: str, *, mode: str = "append", auto_fee: bool = True) -> None:
+    trade = normalize_trade(row)
+    if not np.isfinite(trade["quantity"]) or trade["quantity"] <= 0:
+        raise ValueError("Quantity must be greater than zero.")
+    if not np.isfinite(trade["price"]) or trade["price"] <= 0 or not trade["symbol"]:
+        raise ValueError("A stock and a positive price are required.")
+    st.session_state.pending_trade_confirmation = {
+        "trade": trade, "user": user, "mode": mode, "auto_fee": auto_fee,
+    }
+
+
+@st.dialog("确认交易与券商", width="large", dismissible=False)
+def confirm_trade_dialog(role: str, user: str) -> None:
+    pending = st.session_state.get("pending_trade_confirmation")
+    if not pending:
+        return
+    if role not in {"editor", "admin"} or pending["user"] != user:
+        st.session_state.pop("pending_trade_confirmation", None)
+        st.error("Please sign in again before saving this trade.")
+        return
+    trade = dict(pending["trade"])
+    trade_id = trade["id"]
+    broker = st.selectbox("确认券商", BROKERS, index=BROKERS.index(trade["broker"]), key=f"confirm_broker_{trade_id}")
+    st.write(f"**{broker} · {trade['fmp_symbol']} · {'卖出' if trade['side'] == 'SELL' else '买入'}**")
+    st.write(f"{trade['date']} · {trade['quantity']:,.0f} 股 × {currency_amount(trade['price'], trade['currency'])}")
+    auto_fee = core.calculated_fee(
+        trade["fmp_symbol"], trade["quantity"], trade["price"], trade["currency"],
+        broker=broker, side=trade["side"], trade_date=trade["date"],
+    )
+    if broker == "浙商" and trade["currency"] == "USD" and not core.is_hk_symbol(trade["fmp_symbol"]):
+        fees = core.zheshang_us_fee(trade["quantity"], trade["price"], trade["side"], trade["date"])
+        a, b, c = st.columns(3)
+        a.metric("佣金", currency_amount(fees["commission"], "USD"))
+        b.metric("SEC 监管费（卖出）", currency_amount(fees["sec"], "USD"))
+        c.metric("TAF 交易活动费（卖出）", currency_amount(fees["taf"], "USD"))
+        with st.expander("浙商美股收费规则"):
+            st.write("佣金：每股 US$0.008，每单最低 US$2，同一成交单合并计算。")
+            st.write("卖出 SEC 监管费：成交金额 × 0.0000206，向上取至美分；该费率自 2026-04-04 起适用。")
+            st.write("卖出 TAF：2026 年每股 US$0.000195，最低 US$0.01、最高 US$9.79，向上取至美分；2026-10-01 至 2026-12-31 暂停收取。买入无 SEC/TAF。")
+    manual = st.checkbox("手动指定总手续费", value=not pending["auto_fee"], key=f"confirm_manual_fee_{trade_id}")
+    fee = st.number_input("总手续费", min_value=0.0, value=float(trade["fee"]), step=0.01,
+                          key=f"confirm_fee_{trade_id}") if manual else auto_fee
+    st.metric("本次记录手续费", currency_amount(fee, trade["currency"]))
+    confirmed = st.checkbox(f"确认本笔交易属于「{broker}」账户", key=f"confirm_account_{trade_id}_{broker}")
+    save, cancel = st.columns(2)
+    if cancel.button("返回修改", key=f"cancel_confirm_{trade_id}"):
+        st.session_state.pop("pending_trade_confirmation", None)
+        st.rerun()
+    if save.button("确认并保存", type="primary", disabled=not confirmed, key=f"save_confirm_{trade_id}"):
+        try:
+            trade.update(broker=broker, fee=fee)
+            if pending["mode"] == "update":
+                result = update_trade_record(trade, user)
+                if result.startswith("local_fallback:"):
+                    st.warning("Cloud update was not confirmed. The edit was saved locally; refresh records before retrying.")
+                    return
+            else:
+                append_trade(trade)
+            st.session_state.pop("pending_trade_confirmation", None)
+            st.session_state.trade_save_message = f"已保存：{broker} {trade['side']} {trade['quantity']:,.0f} {trade['fmp_symbol']}；手续费 {currency_amount(fee, trade['currency'])}"
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+
 def render_trade_entry(role: str, user: str) -> None:
     st.subheader("Trade Entry")
     if role not in {"editor", "admin"}:
         st.info("Viewer 权限只能查看，不能新增交易。")
         return
+    saved_message = st.session_state.pop("trade_save_message", None)
+    if saved_message:
+        st.success(saved_message)
     with st.form("natural_trade"):
         text = st.text_input("Natural language", placeholder="例：买100股 英伟达 / sell 20 NVDA @ 150")
         natural_broker = st.selectbox("Broker", BROKERS, index=0, key="natural_trade_broker")
-        submitted = st.form_submit_button("Parse and save", type="primary")
+        submitted = st.form_submit_button("预览并确认", type="primary")
     if submitted:
         try:
             trade = parse_trade_text(text, user, natural_broker)
-            append_trade(trade)
-            st.success(f"Saved {trade['broker']} {trade['side']} {trade['quantity']} {trade['fmp_symbol']} @ {trade['price']:.2f}; fee {trade['fee']:.2f}")
-            st.rerun()
+            stage_trade_confirmation(trade, user)
         except Exception as exc:
             st.error(str(exc))
 
@@ -2194,10 +2273,10 @@ def render_trade_entry(role: str, user: str) -> None:
             date = c7.date_input("Date", value=dt.date.today())
             broker = c8.selectbox("Broker", BROKERS, index=0, key="manual_trade_broker")
             note = st.text_input("Note")
-            ok = st.form_submit_button("Save manual trade")
+            ok = st.form_submit_button("预览并确认手动交易")
         if ok:
             try:
-                append_trade(
+                stage_trade_confirmation(
                     {
                         "side": side,
                         "symbol": symbol,
@@ -2210,13 +2289,13 @@ def render_trade_entry(role: str, user: str) -> None:
                         "note": note,
                         "created_by": user,
                         "source": "streamlit_manual",
-                    }
+                    }, user, auto_fee=fee == 0,
                 )
-                st.success("Trade saved.")
-                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
     render_trade_record_manager(role, user)
+    if st.session_state.get("pending_trade_confirmation"):
+        confirm_trade_dialog(role, user)
 
 
 def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:

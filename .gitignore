@@ -4,6 +4,7 @@ data/
 uploads/
 __pycache__/
 *.pyc
+.test_deps/
 server-*.log
 server-*.err
 *.log
