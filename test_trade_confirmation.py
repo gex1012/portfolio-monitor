@@ -104,6 +104,15 @@ class TradeConfirmationTests(unittest.TestCase):
         self.assertEqual(app.session_state.saved[0]["fee"], 9.99)
         self.assertEqual(app.session_state.saved[0]["broker"], "浙商")
 
+    def test_hk_broker_confirmation_uses_notional_minimum_rule(self):
+        app = self.app()
+        find(app.text_input, "Natural language").set_value("buy 100 0700 @ 500")
+        find(app.button, "预览并确认").click().run()
+        find(app.selectbox, "确认券商").select("浙商").run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(find(app.metric, "本次记录手续费").value, "HK$10.00")
+        self.assertNotIn("saved", app.session_state)
+
     def test_legacy_dividend_broker_round_trip(self):
         app = self.app()
         self.assertEqual(app.session_state.normalized_legacy["broker"], "浙商")

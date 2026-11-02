@@ -264,6 +264,9 @@ def zheshang_us_fee(quantity: float, price: float, side: str, trade_date: Any) -
 
 def calculated_fee(symbol: str, quantity: float, price: float, currency: str, exchange: str | None = None,
                    *, broker: str = "", side: str = "BUY", trade_date: Any = None) -> float:
+    if broker == "浙商" and (is_hk_symbol(fmp_symbol(symbol)) or currency.upper() == "HKD" or "HK" in str(exchange or "").upper()):
+        notional = Decimal(str(abs(quantity))) * Decimal(str(abs(price)))
+        return float(max(Decimal("5"), notional * Decimal("0.0002")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     if broker == "浙商" and currency.upper() == "USD" and not is_hk_symbol(symbol):
         return zheshang_us_fee(quantity, price, side, trade_date or dt.date.today())["total"]
     return abs(quantity * price) * fee_rate_for_trade(symbol, currency, exchange)

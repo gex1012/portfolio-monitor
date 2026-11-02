@@ -2218,6 +2218,8 @@ def confirm_trade_dialog(role: str, user: str) -> None:
             st.write("佣金：每股 US$0.008，每单最低 US$2，同一成交单合并计算。")
             st.write("卖出 SEC 监管费：成交金额 × 0.0000206，向上取至美分；该费率自 2026-04-04 起适用。")
             st.write("卖出 TAF：2026 年每股 US$0.000195，最低 US$0.01、最高 US$9.79，向上取至美分；2026-10-01 至 2026-12-31 暂停收取。买入无 SEC/TAF。")
+    if broker == "浙商" and trade["currency"] == "HKD":
+        st.caption("浙商港股：成交金额 × 0.02%（万二），每单最低 HK$5。未提供的印花税等代收费未另加，可按结单手动指定总费用。")
     manual = st.checkbox("手动指定总手续费", value=not pending["auto_fee"], key=f"confirm_manual_fee_{trade_id}")
     fee = st.number_input("总手续费", min_value=0.0, value=float(trade["fee"]), step=0.01,
                           key=f"confirm_fee_{trade_id}") if manual else auto_fee

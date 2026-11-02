@@ -26,7 +26,18 @@ class TradeFeeTests(unittest.TestCase):
 
     def test_existing_broker_and_hk_unchanged(self):
         self.assertAlmostEqual(app.calculated_fee("VRT", 50, 234.5, "USD", broker="国投"), 23.45)
-        self.assertAlmostEqual(app.calculated_fee("0883.HK", 1000, 24.1, "HKD", broker="浙商"), 50.61)
+        self.assertAlmostEqual(app.calculated_fee("0883.HK", 1000, 24.1, "HKD", broker="国投"), 50.61)
+
+    def test_zheshang_hk_notional_rate_and_minimum(self):
+        for side in ["BUY", "SELL"]:
+            for symbol, qty, price, expected in [
+                ("0883.HK", 1000, 24.1, 5.0),
+                ("883", 1000, 25, 5.0),
+                ("0883.HK", 10000, 24.1, 48.2),
+                ("0700.HK", 100, 500, 10.0),
+            ]:
+                with self.subTest(side=side, symbol=symbol, qty=qty):
+                    self.assertEqual(app.calculated_fee(symbol, qty, price, "HKD", broker="浙商", side=side), expected)
 
 
 if __name__ == "__main__":
