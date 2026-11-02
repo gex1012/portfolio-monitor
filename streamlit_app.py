@@ -8,6 +8,7 @@ import os
 import re
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
+from industry_allocation import build_industry_allocation, classify_security
 
 
 ROOT = Path(__file__).resolve().parent
@@ -3390,8 +3393,82 @@ def build_risk_assessment(portfolio: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_industry_classifications(symbols: tuple[str, ...]) -> dict[str, dict[str, str]]:
+    def fetch(symbol: str) -> tuple[str, dict[str, str]]:
+        try:
+            data = core.fmp_get("/stable/profile", {"symbol": symbol}, ttl=86400)
+            profile = next((item for item in data if isinstance(item, dict) and
+                            core.fmp_symbol(str(item.get("symbol", ""))) == symbol), {}) if isinstance(data, list) else {}
+        except Exception:
+            profile = {}
+        return symbol, classify_security(symbol, profile)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return dict(pool.map(fetch, symbols))
+
+
+def render_industry_allocation(portfolio: dict[str, Any]) -> None:
+    st.markdown("#### 行业持仓分布")
+    holdings = portfolio.get("holdings", [])
+    if not holdings:
+        st.info("暂无持仓。")
+        return
+    account_col, level_col = st.columns([1, 2])
+    account = account_col.selectbox("行业统计账户", ["全部账户"] + BROKERS, key="industry_broker")
+    level = level_col.radio("分类层级", ["行业大类", "细分行业"], horizontal=True, key="industry_level")
+    broker = None if account == "全部账户" else account
+    nav = (portfolio.get("account", {}).get("equity_usd", 0) if broker is None else
+           portfolio.get("broker_accounts", {}).get(broker, {}).get("equity_usd", 0))
+    symbols = tuple(sorted({core.fmp_symbol(str(row["symbol"])) for row in holdings}))
+    classifications = load_industry_classifications(symbols)
+    allocation = build_industry_allocation(holdings, classifications, broker=broker, nav=to_float(nav),
+                                            level="industry" if level == "细分行业" else "sector")
+    if not allocation.get("ok"):
+        st.info("该账户暂无可统计的持仓市值。")
+        return
+    summary = allocation["summary"]
+    top = summary.iloc[0]
+    a, b, c = st.columns(3)
+    a.metric("持仓市值" if not allocation["has_shorts"] else "持仓总敞口（绝对值）", money(allocation["gross_value_usd"]))
+    b.metric("行业 / 类别数", str(len(summary)))
+    c.metric("最大行业占比", pct(top["weight"]), str(top["category"]), delta_color="off")
+    left, right = st.columns([1, 1.3], gap="medium")
+    with left:
+        chart = alt.Chart(summary).mark_bar(cornerRadiusEnd=3).encode(
+            y=alt.Y("category:N", title=None, sort="-x", axis=alt.Axis(labelLimit=180)),
+            x=alt.X("weight:Q", title="持仓市值占比", axis=alt.Axis(format=".0%")),
+            color=alt.Color("category:N", legend=None, scale=alt.Scale(scheme="tableau10")),
+            tooltip=[alt.Tooltip("category:N", title="行业"), alt.Tooltip("market_value_usd:Q", title="市值 USD", format=",.0f"),
+                     alt.Tooltip("weight:Q", title="持仓占比", format=".2%"), alt.Tooltip("stock_count:Q", title="标的数"),
+                     alt.Tooltip("symbols:N", title="持仓标的")],
+        ).properties(height=max(240, 36 * len(summary)))
+        st.altair_chart(chart, use_container_width=True)
+    with right:
+        view = summary[["category", "market_value_usd", "weight", "nav_weight", "stock_count", "unrealized_pnl_usd"]].rename(columns={
+            "category": "行业", "market_value_usd": "市值 USD", "weight": "持仓占比", "nav_weight": "权益占比",
+            "stock_count": "标的数", "unrealized_pnl_usd": "浮动盈亏 USD",
+        })
+        st.dataframe(view.style.format({"市值 USD": "${:,.0f}", "持仓占比": "{:.2%}", "权益占比": "{:.2%}",
+                                      "标的数": "{:,.0f}", "浮动盈亏 USD": "${:,.0f}"}, na_rep="-"),
+                     use_container_width=True, hide_index=True, height=min(540, 42 + 35 * len(view)))
+    st.caption("金额以 USD 计；持仓占比以持仓市值绝对值为分母，不含现金；权益占比以所选账户权益为分母。同一股票跨券商合并。SOXX 按半导体、WEAT 按农业商品归类，ETF 不展开底层持仓，也不按杠杆倍数放大。")
+    if allocation["unknown_value_usd"]:
+        st.warning(f"仍有 {money(allocation['unknown_value_usd'])} 持仓尚未确认行业或基金投向，已保留在统计中。")
+    selected = st.selectbox("行业明细", ["全部行业"] + summary["category"].tolist(), key="industry_detail")
+    positions = allocation["positions"]
+    if selected != "全部行业":
+        positions = positions[positions["industry" if level == "细分行业" else "sector"] == selected]
+    detail = positions[["symbol", "broker", "sector", "industry", "instrument", "quantity", "market_value_usd", "weight", "classification_source"]].rename(columns={
+        "symbol": "股票", "broker": "券商", "sector": "行业大类", "industry": "细分行业", "instrument": "类型", "quantity": "股数",
+        "market_value_usd": "市值 USD", "weight": "持仓占比", "classification_source": "分类来源",
+    })
+    st.dataframe(detail.style.format({"股数": "{:,.0f}", "市值 USD": "${:,.0f}", "持仓占比": "{:.2%}"}),
+                 use_container_width=True, hide_index=True, height=min(550, 42 + 35 * len(detail)))
+
+
 def render_risk_assessment(portfolio: dict[str, Any]) -> None:
     st.subheader("Risk Assessment")
+    render_industry_allocation(portfolio)
     risk = build_risk_assessment(portfolio)
     if not risk.get("ok"):
         st.info(risk.get("note", "-"))
@@ -3515,6 +3592,7 @@ def clear_data_caches() -> None:
         load_trades_cached,
         load_dividend_records_cached,
         load_option_oi_history_cached,
+        load_industry_classifications,
         risk_history,
     ]:
         try:
