@@ -16,7 +16,7 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
+
 
 from industry_allocation import build_industry_allocation, classify_security
 
@@ -1539,7 +1539,7 @@ def render_candlestick_chart(rows: list[dict[str, Any]]) -> None:
     });
     </script>
     """.replace("__DATA__", chart_data)
-    components.html(html, height=410)
+    st.iframe(html, height=410)
 
 
 def render_volume_profile_html(rows: list[dict[str, Any]]) -> str:
@@ -1666,7 +1666,7 @@ def render_gex_proxy(options: dict[str, Any], spot: float) -> None:
         )
         .properties(height=260)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     st.caption("GEX proxy = (Call OI - Put OI) x 100 x spot x distance weight. 这是 OI 近似，不等同于完整 dealer gamma。")
     st.info(gex_proxy_comment(gex, spot))
 
@@ -1771,7 +1771,7 @@ def render_gex_proxy(options: dict[str, Any], spot: float) -> None:
         )
         .properties(height=260)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     st.caption(
         "This is a near-spot OI proxy: (Call OI - Put OI) x 100 x spot x distance weight. "
         "It is not full dealer GEX because the free Cboe delayed feed here does not provide option gamma/IV for every contract."
@@ -1837,10 +1837,10 @@ def render_option_oi_history(symbol: str) -> None:
     left, right = st.columns(2, gap="medium")
     with left:
         st.caption("Put/Call OI ratio")
-        st.altair_chart(ratio_chart, use_container_width=True)
+        st.altair_chart(ratio_chart, width="stretch")
     with right:
         st.caption("Total Call vs Put OI")
-        st.altair_chart(oi_chart, use_container_width=True)
+        st.altair_chart(oi_chart, width="stretch")
     latest = history.iloc[-1]
     st.caption(
         f"Latest snapshot: {latest['date'].date()} | Call OI {latest['total_call_oi']:,.0f} | "
@@ -1886,7 +1886,7 @@ def render_index_strip() -> None:
                         }
                     ]
                 )
-                st.dataframe(ret_df, use_container_width=True, hide_index=True, height=70)
+                st.dataframe(ret_df, width="stretch", hide_index=True, height=70)
                 st.caption(f"{clean_text(item.get('trend')) or '-'} | {clean_text(item.get('comment'))}")
 
 
@@ -1977,7 +1977,7 @@ def render_overview(portfolio: dict[str, Any]) -> None:
             broker_styled = broker_styled.map(color_signed, subset=signed_broker_cols)
         else:
             broker_styled = broker_styled.applymap(color_signed, subset=signed_broker_cols)
-        st.dataframe(broker_styled, use_container_width=True, hide_index=True, height=112)
+        st.dataframe(broker_styled, width="stretch", hide_index=True, height=112)
     st.subheader("Index Tape")
     render_index_strip()
     render_holding_date_alerts(portfolio)
@@ -2063,7 +2063,7 @@ def render_overview(portfolio: dict[str, Any]) -> None:
             ]
         )
     )
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=min(560, 42 + 36 * len(view)))
+    st.dataframe(styled, width="stretch", hide_index=True, height=min(560, 42 + 36 * len(view)))
 
 
 def render_trade_record_manager(role: str, user: str) -> None:
@@ -2475,7 +2475,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
         },
         na_rep="-",
     )
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=min(520, 42 + 34 * len(view)))
+    st.dataframe(styled, width="stretch", hide_index=True, height=min(520, 42 + 34 * len(view)))
     if role not in {"editor", "admin"}:
         return
 
@@ -2866,7 +2866,7 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
         if macro_calendar.empty:
             st.info("-")
         else:
-            st.dataframe(style_priority_table(macro_calendar), use_container_width=True, hide_index=True, height=min(420, 42 + 34 * len(macro_calendar)))
+            st.dataframe(style_priority_table(macro_calendar), width="stretch", hide_index=True, height=min(420, 42 + 34 * len(macro_calendar)))
     with cal_right:
         st.markdown("#### Holding Date Alerts")
         symbols = [p["symbol"] for p in portfolio.get("holdings", [])]
@@ -2874,7 +2874,7 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
         if events.empty:
             st.info("-")
         else:
-            st.dataframe(events, use_container_width=True, hide_index=True, height=min(420, 42 + 34 * len(events)))
+            st.dataframe(events, width="stretch", hide_index=True, height=min(420, 42 + 34 * len(events)))
 
     idx_df = pd.DataFrame(index_items)
     st.markdown("#### Index Snapshot")
@@ -2895,7 +2895,7 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
                 "comment": "Comment",
             }
         )
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
 
     st.markdown("#### 24h Macro Tape")
     rows = pd.DataFrame(macro.get("items", []))
@@ -2918,7 +2918,7 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
                 "comment": "Comment",
             }
         )
-        st.dataframe(style_priority_table(view), use_container_width=True, hide_index=True)
+        st.dataframe(style_priority_table(view), width="stretch", hide_index=True)
 
 
 def macro_cell(value: Any) -> str:
@@ -2976,7 +2976,7 @@ def render_holding_date_alerts(portfolio: dict[str, Any]) -> None:
         return
     st.dataframe(
         events,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=min(260, 42 + 34 * len(events)),
         column_config={
@@ -3020,7 +3020,7 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
                     macro_calendar[col] = macro_calendar[col].apply(macro_cell)
             st.dataframe(
                 style_priority_table(macro_calendar),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=min(420, 42 + 34 * len(macro_calendar)),
                 column_config={
@@ -3062,7 +3062,7 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
             view["Last"] = view["Last"].apply(lambda x: compact_number(x, 2))
         st.dataframe(
             view,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=150,
             column_config={
@@ -3102,7 +3102,7 @@ def render_macro_indexes(portfolio: dict[str, Any]) -> None:
                 view[col] = view[col].apply(macro_cell)
         st.dataframe(
             style_priority_table(view),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(520, 42 + 34 * len(view)),
             column_config={
@@ -3444,7 +3444,7 @@ def render_industry_allocation(portfolio: dict[str, Any]) -> None:
                      alt.Tooltip("weight:Q", title="持仓占比", format=".2%"), alt.Tooltip("stock_count:Q", title="标的数"),
                      alt.Tooltip("symbols:N", title="持仓标的")],
         ).properties(height=max(240, 36 * len(summary)))
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
     with right:
         view = summary[["category", "market_value_usd", "weight", "nav_weight", "stock_count", "unrealized_pnl_usd"]].rename(columns={
             "category": "行业", "market_value_usd": "市值 USD", "weight": "持仓占比", "nav_weight": "权益占比",
@@ -3452,7 +3452,7 @@ def render_industry_allocation(portfolio: dict[str, Any]) -> None:
         })
         st.dataframe(view.style.format({"市值 USD": "${:,.0f}", "持仓占比": "{:.2%}", "权益占比": "{:.2%}",
                                       "标的数": "{:,.0f}", "浮动盈亏 USD": "${:,.0f}"}, na_rep="-"),
-                     use_container_width=True, hide_index=True, height=min(540, 42 + 35 * len(view)))
+                     width="stretch", hide_index=True, height=min(540, 42 + 35 * len(view)))
     st.caption("金额以 USD 计；持仓占比以持仓市值绝对值为分母，不含现金；权益占比以所选账户权益为分母。同一股票跨券商合并。SOXX 按半导体、WEAT 按农业商品归类，ETF 不展开底层持仓，也不按杠杆倍数放大。")
     if allocation["unknown_value_usd"]:
         st.warning(f"仍有 {money(allocation['unknown_value_usd'])} 持仓尚未确认行业或基金投向，已保留在统计中。")
@@ -3465,7 +3465,7 @@ def render_industry_allocation(portfolio: dict[str, Any]) -> None:
         "market_value_usd": "市值 USD", "weight": "持仓占比", "classification_source": "分类来源",
     })
     st.dataframe(detail.style.format({"股数": "{:,.0f}", "市值 USD": "${:,.0f}", "持仓占比": "{:.2%}"}),
-                 use_container_width=True, hide_index=True, height=min(550, 42 + 35 * len(detail)))
+                 width="stretch", hide_index=True, height=min(550, 42 + 35 * len(detail)))
 
 
 def render_risk_assessment(portfolio: dict[str, Any]) -> None:
@@ -3497,12 +3497,12 @@ def render_risk_assessment(portfolio: dict[str, Any]) -> None:
     with chart_left:
         st.markdown("#### Position Weight")
         alloc = holdings[["symbol", "weight"]].rename(columns={"symbol": "Symbol", "weight": "Weight"})
-        st.altair_chart(risk_bar_chart(alloc, "Weight", "Position Weight"), use_container_width=True)
+        st.altair_chart(risk_bar_chart(alloc, "Weight", "Position Weight"), width="stretch")
     with chart_right:
         st.markdown("#### Risk Contribution")
         rc = holdings[["symbol", "Risk Contribution"]].rename(columns={"symbol": "Symbol"})
         rc["Risk Contribution"] = pd.to_numeric(rc["Risk Contribution"], errors="coerce").fillna(0)
-        st.altair_chart(risk_bar_chart(rc, "Risk Contribution", "Risk Contribution"), use_container_width=True)
+        st.altair_chart(risk_bar_chart(rc, "Risk Contribution", "Risk Contribution"), width="stretch")
 
     scatter = holdings[["symbol", "weight", "ann_vol", "beta_sp", "Risk Contribution"]].rename(
         columns={"symbol": "Symbol", "weight": "Weight", "ann_vol": "Annual Vol", "beta_sp": "Beta", "Risk Contribution": "Risk Contribution"}
@@ -3511,7 +3511,7 @@ def render_risk_assessment(portfolio: dict[str, Any]) -> None:
     scatter["Annual Vol"] = pd.to_numeric(scatter["Annual Vol"], errors="coerce").fillna(0)
     scatter["Beta"] = pd.to_numeric(scatter["Beta"], errors="coerce").fillna(1)
     st.markdown("#### Weight vs Volatility")
-    st.altair_chart(risk_scatter_chart(scatter), use_container_width=True)
+    st.altair_chart(risk_scatter_chart(scatter), width="stretch")
 
     detail = holdings[
         ["symbol", "market_value_usd", "weight", "ann_vol", "beta_sp", "corr_sp", "corr_nq", "Risk Contribution", "unrealized_pnl_usd"]
@@ -3546,7 +3546,7 @@ def render_risk_assessment(portfolio: dict[str, Any]) -> None:
     else:
         styled = styled.applymap(color_signed, subset=["Unrealized"])
     st.markdown("#### Position Risk Table")
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=min(520, 42 + 34 * len(detail)))
+    st.dataframe(styled, width="stretch", hide_index=True, height=min(520, 42 + 34 * len(detail)))
 
     scenario = risk["scenarios"].copy()
     scenario_view = scenario.style.format({"Estimated PnL": "${:,.0f}", "Pct NAV": "{:+.2%}"})
@@ -3555,12 +3555,12 @@ def render_risk_assessment(portfolio: dict[str, Any]) -> None:
     else:
         scenario_view = scenario_view.applymap(color_signed, subset=["Estimated PnL", "Pct NAV"])
     st.markdown("#### Stress Scenarios")
-    st.dataframe(scenario_view, use_container_width=True, hide_index=True, height=245)
+    st.dataframe(scenario_view, width="stretch", hide_index=True, height=245)
 
     if len(risk["returns"].columns) > 1:
         st.markdown("#### Correlation Matrix")
         corr = risk["returns"].corr().round(2)
-        st.altair_chart(correlation_heatmap(corr), use_container_width=True)
+        st.altair_chart(correlation_heatmap(corr), width="stretch")
 
 
 def render_admin(role: str, portfolio: dict[str, Any]) -> None:
@@ -3570,23 +3570,23 @@ def render_admin(role: str, portfolio: dict[str, Any]) -> None:
     c2.metric("Dividend PnL", money(account.get("dividend_pnl_usd", 0)))
     c3.metric("Realized incl. Dividends", money(account.get("realized_with_dividend_usd", 0)))
     st.subheader("Transactions")
-    st.dataframe(pd.DataFrame(portfolio["transactions"]), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(portfolio["transactions"]), width="stretch", hide_index=True)
     st.subheader("Trading Realized PnL")
-    st.dataframe(pd.DataFrame(portfolio["realized"]), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(portfolio["realized"]), width="stretch", hide_index=True)
     st.subheader("Dividend PnL")
     dividend_records = pd.DataFrame(portfolio.get("dividends", []))
     if dividend_records.empty:
         st.info("No dividend PnL records yet.")
     else:
         dividend_records = dividend_records.sort_values("date", ascending=False)
-        st.dataframe(dividend_records, use_container_width=True, hide_index=True)
+        st.dataframe(dividend_records, width="stretch", hide_index=True)
     if role == "admin":
         st.subheader("Audit Log")
         audit = pd.DataFrame(load_audit())
         if audit.empty:
             st.info("Audit log is empty or Google Sheets is not configured.")
         else:
-            st.dataframe(audit.sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
+            st.dataframe(audit.sort_values("timestamp", ascending=False), width="stretch", hide_index=True)
 
 
 def clear_data_caches() -> None:
