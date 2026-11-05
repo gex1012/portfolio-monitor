@@ -15,6 +15,10 @@ from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+
+from corporate_actions import (normalize_splits, portfolio_timeline, apply_split,
+                               adjust_raw_history, validate_split_quotes, SplitQuotePending)
 
 import numpy as np
 import pandas as pd
@@ -736,6 +740,7 @@ def yahoo_quote(symbol: str) -> dict[str, Any]:
         "dayHigh": to_number(meta.get("regularMarketDayHigh")),
         "volume": to_number(meta.get("regularMarketVolume")),
         "source": "Yahoo public chart",
+        "timestamp": meta.get("regularMarketTime"),
     }
 
 
@@ -841,6 +846,8 @@ def fx_rates_to_usd() -> dict[str, Any]:
 def compute_portfolio() -> dict[str, Any]:
     bundle = all_transactions()
     txs = bundle["transactions"]
+    split_bundle = stock_split_events([t["fmp_symbol"] for t in txs])
+    split_adjustments = []
     quotes = quote_for_symbols([t["fmp_symbol"] for t in txs])
     fx_bundle = fx_rates_to_usd()
     fx = fx_bundle["to_usd"]
@@ -848,7 +855,10 @@ def compute_portfolio() -> dict[str, Any]:
     realized_rows: list[dict[str, Any]] = []
     realized_total_usd = 0.0
 
-    for t in txs:
+    for t in portfolio_timeline(txs, split_bundle["events"]):
+        if t.get("event_type") == "split":
+            split_adjustments.extend(apply_split(positions, t))
+            continue
         symbol = t["fmp_symbol"]
         pos = positions.setdefault(
             symbol,
@@ -900,6 +910,7 @@ def compute_portfolio() -> dict[str, Any]:
                 }
             )
 
+    validate_split_quotes(split_adjustments, quotes)
     projects = []
     unrealized_total_usd = 0.0
     market_value_total_usd = 0.0
@@ -965,6 +976,8 @@ def compute_portfolio() -> dict[str, Any]:
             "closed_project_count": len(projects) - len(holdings),
         },
         "holdings": holdings,
+        "split_adjustments": split_adjustments,
+        "corporate_action_warnings": split_bundle["warnings"],
         "projects": projects,
         "realized": realized_rows[-250:],
         "transactions": txs[-250:],
@@ -983,14 +996,91 @@ def public_config() -> dict[str, Any]:
     }
 
 
+def yahoo_split_events(symbol: str) -> list[dict[str, Any]] | None:
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
+           "?range=max&interval=3mo&events=splits")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as response:
+            result = json.loads(response.read().decode("utf-8"))["chart"]["result"][0]
+        rows = []
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(result["meta"]["exchangeTimezoneName"])
+        for event in result.get("events", {}).get("splits", {}).values():
+            rows.append({**event, "date": dt.datetime.fromtimestamp(event["date"], zone).date().isoformat()})
+        return rows
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def stock_split_events(symbols: list[str]) -> dict[str, Any]:
+    """Fetch arbitrary forward/reverse ratios; keep last good results on outages."""
+    def fetch(symbol):
+        key = f"splits:{symbol}"
+        cached = CACHE.get(key)
+        if cached and time.time() - cached[0] < 3600:
+            return cached[1]
+        path = DATA_DIR / ("splits_" + re.sub(r"[^A-Z0-9._-]", "_", symbol) + ".json")
+        previous = []
+        try:
+            previous = normalize_splits(symbol, json.loads(path.read_text(encoding="utf-8")), "saved snapshot")
+        except (OSError, ValueError, TypeError):
+            pass
+        data = fmp_get("/stable/splits", {"symbol": symbol}, ttl=3600)
+        source = "FMP splits"
+        if not isinstance(data, list):
+            data = yahoo_split_events(symbol)
+            source = "Yahoo split events"
+        warning = ""
+        try:
+            if not isinstance(data, list):
+                raise ValueError("unavailable")
+            fetched = normalize_splits(symbol, data, source)
+            if len(fetched) != len(data):
+                # Invalid provider rows must not silently erase a previously known event.
+                warning = f"{symbol}: some split records were invalid; last known events retained."
+            by_date = {event["date"]: event for event in previous}
+            by_date.update({event["date"]: event for event in fetched})
+            events = list(by_date.values())
+            try:
+                DATA_DIR.mkdir(exist_ok=True)
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=DATA_DIR, delete=False) as handle:
+                    json.dump(events, handle)
+                    temp = handle.name
+                os.replace(temp, path)
+            except OSError:
+                warning = f"{symbol}: split snapshot could not be saved."
+        except (ValueError, TypeError):
+            events = previous
+            warning = f"{symbol}: split feed unavailable; using last known events. New actions may be missing."
+        # Issuer-verified correction takes precedence over provider calendars.
+        if symbol == "SOXX":
+            events = [e for e in events if e["date"] not in ("2026-11-04", "2026-11-05", "2026-11-06")]
+            events += normalize_splits(symbol, [{"date": "2026-11-05", "numerator": 3, "denominator": 1}],
+                "https://www.sec.gov/Archives/edgar/data/1100663/000119312526430480/d156277d497.htm")
+        result = (events, warning)
+        CACHE[key] = (time.time(), result)
+        return result
+
+    unique = sorted({fmp_symbol(symbol) for symbol in symbols if symbol and not symbol.startswith("^")})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(fetch, unique))
+    return {"events": [event for events, _ in results for event in events],
+            "warnings": [warning for _, warning in results if warning]}
+
+
 def historical_prices(symbol: str) -> list[dict[str, Any]]:
+    # FMP full and Yahoo OHLC already adjust for splits. Never apply the ledger
+    # split multiplier here, which would adjust these prices a second time.
     sym = fmp_symbol(symbol)
     if sym.startswith("^"):
         return yahoo_history(sym, "1y")[-260:]
     if is_hk_symbol(sym):
         hk_rows = hk_public_history(sym, 320)
         if hk_rows:
-            return hk_rows[-260:]
+            events = stock_split_events([sym])["events"]
+            return adjust_raw_history(hk_rows[-260:], events)
     start = (dt.date.today() - dt.timedelta(days=420)).isoformat()
     data = fmp_get("/stable/historical-price-eod/full", {"symbol": sym, "from": start}, ttl=900)
     if isinstance(data, list):
@@ -1004,7 +1094,7 @@ def historical_prices(symbol: str) -> list[dict[str, Any]]:
     if yahoo_rows:
         return yahoo_rows
     if is_hk_symbol(sym):
-        return hk_public_history(sym, 320)[-260:]
+        return adjust_raw_history(hk_public_history(sym, 320)[-260:], stock_split_events([sym])["events"])
     return []
 
 

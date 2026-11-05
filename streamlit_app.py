@@ -808,6 +808,8 @@ def load_option_oi_history() -> list[dict[str, Any]]:
 
 def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
     txs = sorted([normalize_trade(t) for t in txs], key=lambda x: (x.get("date") or "", x.get("id") or ""))
+    split_bundle = core.stock_split_events([t["fmp_symbol"] for t in txs])
+    split_adjustments = []
     quotes = core.quote_for_symbols([t["fmp_symbol"] for t in txs])
     fx_bundle = core.fx_rates_to_usd()
     fx = fx_bundle["to_usd"]
@@ -828,7 +830,10 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
         for broker in BROKERS
     }
 
-    for t in txs:
+    for t in core.portfolio_timeline(txs, split_bundle["events"]):
+        if t.get("event_type") == "split":
+            split_adjustments.extend(core.apply_split(positions, t))
+            continue
         symbol = t["fmp_symbol"]
         broker = t.get("broker") if t.get("broker") in BROKERS else DEFAULT_BROKER
         position_key = f"{broker}|{symbol}"
@@ -881,6 +886,7 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
                 }
             )
 
+    core.validate_split_quotes(split_adjustments, quotes)
     projects = []
     unrealized_total_usd = 0.0
     market_value_total_usd = 0.0
@@ -961,6 +967,8 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
             "closed_project_count": len(projects) - len(holdings),
         },
         "broker_accounts": broker_stats,
+        "split_adjustments": split_adjustments,
+        "corporate_action_warnings": split_bundle["warnings"],
         "holdings": holdings,
         "projects": projects,
         "realized": realized_rows[-250:],
@@ -1928,6 +1936,16 @@ def login_gate() -> tuple[str, str]:
 
 
 def render_overview(portfolio: dict[str, Any]) -> None:
+    for adjustment in portfolio.get("split_adjustments", []):
+        st.info(f"{adjustment['symbol']} · {adjustment['broker']} · {adjustment['date']} | "
+                f"Split {adjustment['numerator']:g}:{adjustment['denominator']:g} | "
+                f"{adjustment['before']:g} → {adjustment['after']:g} shares. Total cost unchanged.")
+        if adjustment["fractional"]:
+            st.warning("Fractional shares retained. Reconcile broker cash-in-lieu before recording any disposal.")
+    if portfolio.get("corporate_action_warnings"):
+        with st.expander("Corporate action data warnings", expanded=True):
+            for warning in portfolio["corporate_action_warnings"]:
+                st.warning(warning)
     account = portfolio["account"]
     fx = portfolio["fx"]
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -3596,6 +3614,7 @@ def render_admin(role: str, portfolio: dict[str, Any]) -> None:
 
 
 def clear_data_caches() -> None:
+    core.CACHE.clear()
     for cached_func in [
         load_trades_cached,
         load_dividend_records_cached,
@@ -3623,7 +3642,11 @@ def main() -> None:
             st.rerun()
         c2.caption("If you edited Google Sheet directly, click Refresh data to reload trades immediately.")
     trades = load_trades()
-    portfolio = compute_portfolio_from_trades(trades)
+    try:
+        portfolio = compute_portfolio_from_trades(trades)
+    except core.SplitQuotePending as exc:
+        st.warning(str(exc))
+        st.stop()
     tabs = st.tabs(["Overview", "Trade Entry", "Dividends", "Stock Detail", "Risk Assessment", "Indexes & Macro", "Records"])
     with tabs[0]:
         render_overview(portfolio)

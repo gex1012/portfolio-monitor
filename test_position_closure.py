@@ -8,6 +8,7 @@ import streamlit_app as monitor
 class PositionClosureTests(unittest.TestCase):
     def calculate(self, rows):
         with patch.object(monitor.core, "quote_for_symbols", return_value={"MRVL": {"price": 157}}), \
+             patch.object(monitor.core, "stock_split_events", return_value={"events": [], "warnings": []}), \
              patch.object(monitor.core, "fx_rates_to_usd", return_value={"to_usd": {"USD": 1, "HKD": 1 / 7.8}}), \
              patch.object(monitor.core, "period_return", return_value=None), \
              patch.object(monitor, "period_return_ytd", return_value=None), \
