@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import app as core
 import streamlit_app as monitor
+core = monitor.core
 from corporate_actions import (normalize_splits, portfolio_timeline, apply_split,
                                adjust_raw_history, is_effective, validate_split_quotes, SplitQuotePending)
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime as dt
 import html
-import importlib
 import json
 import os
 import re
@@ -19,6 +18,8 @@ import streamlit as st
 
 
 from industry_allocation import build_industry_allocation, classify_security
+from core_loader import load_core
+from corporate_actions import SplitQuotePending
 
 
 ROOT = Path(__file__).resolve().parent
@@ -106,7 +107,7 @@ def configure_core() -> Any:
     api_key = secret_value("fmp", "api_key", default=os.environ.get("FMP_API_KEY", ""))
     if api_key:
         os.environ["FMP_API_KEY"] = str(api_key)
-    core = importlib.import_module("app")
+    core = load_core(ROOT / "app.py")
     core.CONFIG["api_key"] = str(api_key or core.CONFIG.get("api_key", ""))
     core.CONFIG["account_base_hkd"] = float(secret_value("account", "base_hkd", default=core.CONFIG.get("account_base_hkd", 4_000_000)))
     core.CONFIG["share_password"] = str(secret_value("auth", "viewer_password", default=core.CONFIG.get("share_password", "")))
@@ -3644,7 +3645,7 @@ def main() -> None:
     trades = load_trades()
     try:
         portfolio = compute_portfolio_from_trades(trades)
-    except core.SplitQuotePending as exc:
+    except SplitQuotePending as exc:
         st.warning(str(exc))
         st.stop()
     tabs = st.tabs(["Overview", "Trade Entry", "Dividends", "Stock Detail", "Risk Assessment", "Indexes & Macro", "Records"])
