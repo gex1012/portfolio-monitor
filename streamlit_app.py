@@ -306,6 +306,11 @@ def delete_local_trade(trade_id: str) -> None:
 
 
 def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
+    date = clean_text(row.get("date"))
+    is_imported = clean_text(row.get("source")) == "initial_excel" or clean_text(row.get("id")).startswith("excel-")
+    # Undated initial imports precede subsequent trades; never turn them into today's buys.
+    if not date and not is_imported:
+        date = dt.date.today().isoformat()
     symbol = clean_text(row.get("symbol"))
     if symbol.upper() in {"LOT", "LOTS", "SHARE", "SHARES"}:
         note_symbols = re.findall(r"\b(\d{3,5})(?:\.HK)?\b", clean_text(row.get("note")), flags=re.I)
@@ -328,7 +333,7 @@ def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "id": clean_text(row.get("id")) or f"trade-{int(time.time() * 1000)}",
-        "date": clean_text(row.get("date")) or dt.date.today().isoformat(),
+        "date": date,
         "side": "SELL" if side.startswith("S") else "BUY",
         "symbol": symbol,
         "fmp_symbol": fmp_symbol,
@@ -2111,7 +2116,8 @@ def render_trade_record_manager(role: str, user: str) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     try:
-        edit_date_default = pd.to_datetime(edit_row.get("date"), errors="coerce").date()
+        timestamp = pd.to_datetime(edit_row.get("date"), errors="coerce")
+        edit_date_default = timestamp.date() if pd.notna(timestamp) else None
     except Exception:
         edit_date_default = today
     edit_date = c1.date_input("Trade date", value=edit_date_default, key=f"edit_trade_date_{edit_id}")
@@ -2151,7 +2157,7 @@ def render_trade_record_manager(role: str, user: str) -> None:
         updated = {
             **edit_row,
             "id": edit_id,
-            "date": edit_date.isoformat(),
+            "date": edit_date.isoformat() if edit_date else "",
             "side": edit_side,
             "symbol": edit_symbol,
             "fmp_symbol": edit_fmp_symbol or core.fmp_symbol(edit_symbol),
