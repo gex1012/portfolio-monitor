@@ -246,6 +246,18 @@ def fee_rate_for_trade(symbol: str, currency: str, exchange: str | None = None) 
     return 0.002
 
 
+def guotou_us_fee(quantity: float, price: float, side: str, trade_date: Any) -> dict[str, float]:
+    timestamp = pd.to_datetime(trade_date, errors="raise")
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert("Asia/Hong_Kong")
+    notional = Decimal(str(abs(quantity))) * Decimal(str(abs(price)))
+    commission = notional * Decimal("0.002")
+    sec = Decimal("0")
+    if str(side).upper().startswith("S") and timestamp.date() >= dt.date(2026, 4, 4):
+        sec = (notional * Decimal("0.0000206")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    return {"commission": float(commission), "sec": float(sec), "total": float(commission + sec)}
+
+
 def zheshang_us_fee(quantity: float, price: float, side: str, trade_date: Any) -> dict[str, float]:
     timestamp = pd.to_datetime(trade_date, errors="raise")
     if timestamp.tzinfo is not None:
@@ -273,6 +285,8 @@ def calculated_fee(symbol: str, quantity: float, price: float, currency: str, ex
         return float(max(Decimal("5"), notional * Decimal("0.0002")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     if broker == "浙商" and currency.upper() == "USD" and not is_hk_symbol(symbol):
         return zheshang_us_fee(quantity, price, side, trade_date or dt.date.today())["total"]
+    if broker in ("", "国投") and currency.upper() == "USD" and not is_hk_symbol(fmp_symbol(symbol)) and "HK" not in str(exchange or "").upper():
+        return guotou_us_fee(quantity, price, side, trade_date or dt.date.today())["total"]
     return abs(quantity * price) * fee_rate_for_trade(symbol, currency, exchange)
 
 
@@ -419,7 +433,8 @@ def excel_transactions() -> dict[str, Any]:
                     "side": "SELL",
                     "quantity": exit_qty,
                     "price": exit_price,
-                    "fee": calculated_fee(symbol, exit_qty, exit_price, currency, exchange),
+                    "fee": calculated_fee(symbol, exit_qty, exit_price, currency, exchange,
+                                          side="SELL", trade_date=parse_date("exit_date") or parse_date("date") or dt.date.today()),
                     "currency": currency,
                     "note": "Imported exit from initial Excel",
                 }
@@ -577,7 +592,7 @@ def parse_trade_text(text: str) -> dict[str, Any]:
     if price <= 0:
         raise ValueError(f"没有拿到 {symbol} 的实时价格，请手动填价格")
     currency = infer_currency(symbol)
-    fee = calculated_fee(symbol, qty, price, currency)
+    fee = calculated_fee(symbol, qty, price, currency, side=side, trade_date=dt.date.today())
     return normalize_trade(
         {
             "side": side,

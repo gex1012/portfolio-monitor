@@ -28,6 +28,25 @@ class TradeFeeTests(unittest.TestCase):
         self.assertAlmostEqual(app.calculated_fee("VRT", 50, 234.5, "USD", broker="国投"), 23.45)
         self.assertAlmostEqual(app.calculated_fee("0883.HK", 1000, 24.1, "HKD", broker="国投"), 50.61)
 
+    def test_guotou_sec_statement_and_dates(self):
+        self.assertEqual(app.calculated_fee("LNG", 90, 296, "USD", broker="国投", side="SELL", trade_date="2026-11-04"), 53.83)
+        self.assertEqual(app.calculated_fee("MRVL", 100, 157, "USD", broker="国投", side="SELL", trade_date="2026-11-03T16:00:00Z"), 31.73)
+        self.assertEqual(app.guotou_us_fee(90, 296, "BUY", "2026-11-04")["sec"], 0)
+        self.assertEqual(app.guotou_us_fee(90, 296, "SELL", "2026-04-03")["sec"], 0)
+        self.assertEqual(app.guotou_us_fee(90, 296, "SELL", "2026-04-03T16:00:00Z")["sec"], .55)
+
+    def test_guotou_backfill_preserves_other_fees_and_is_idempotent(self):
+        from backfill_guotou_sec import plan
+        row = {"id": "one", "symbol": "MRVL", "currency": "USD", "quantity": 100,
+               "price": 157, "side": "SELL", "date": "2026-11-04", "fee": 31.4, "broker": "国投"}
+        changes, review = plan([row])
+        self.assertEqual(changes[0]["new_fee"], 31.73)
+        self.assertFalse(review)
+        self.assertEqual(plan([{**row, "fee": 31.73}]), ([], []))
+        self.assertEqual(plan([{**row, "broker": "浙商"}]), ([], []))
+        self.assertEqual(plan([{**row, "fee": 35}]), ([], []))
+        self.assertTrue(plan([{**row, "fee": 2}])[1])
+
     def test_zheshang_hk_notional_rate_and_minimum(self):
         for side in ["BUY", "SELL"]:
             for symbol, qty, price, expected in [

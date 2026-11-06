@@ -2245,6 +2245,12 @@ def confirm_trade_dialog(role: str, user: str) -> None:
             st.write("卖出 TAF：2026 年每股 US$0.000195，最低 US$0.01、最高 US$9.79，向上取至美分；2026-10-01 至 2026-12-31 暂停收取。买入无 SEC/TAF。")
     if broker == "浙商" and trade["currency"] == "HKD":
         st.caption("浙商港股：成交金额 × 0.02%（万二），每单最低 HK$5。未提供的印花税等代收费未另加，可按结单手动指定总费用。")
+    if broker == "国投" and trade["currency"] == "USD" and not core.is_hk_symbol(trade["fmp_symbol"]):
+        fees = core.guotou_us_fee(trade["quantity"], trade["price"], trade["side"], trade["date"])
+        a, b = st.columns(2)
+        a.metric("佣金", currency_amount(fees["commission"], "USD"))
+        b.metric("SEC 监管费（卖出）", currency_amount(fees["sec"], "USD"))
+        st.caption("国投美股：佣金为成交金额的 0.2%；卖出另加按日期适用的 SEC 费，向上取至美分。买入不收 SEC 费。")
     manual = st.checkbox("手动指定总手续费", value=not pending["auto_fee"], key=f"confirm_manual_fee_{trade_id}")
     fee = st.number_input("总手续费", min_value=0.0, value=float(trade["fee"]), step=0.01,
                           key=f"confirm_fee_{trade_id}") if manual else auto_fee
