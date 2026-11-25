@@ -65,8 +65,22 @@ class PositionClosureTests(unittest.TestCase):
         self.assertAlmostEqual(result["account"]["base_usd"], 6_030_922.32 / 7.8)
         self.assertAlmostEqual(guotou["realized_pnl_usd"], -14491.6)
         self.assertAlmostEqual(guotou["equity_usd"], 4_030_922.32 / 7.8 - 14491.6)
+        self.assertAlmostEqual(guotou["equity_hkd"], 4_030_922.32 - 14491.6 * 7.8)
+        self.assertAlmostEqual(zheshang["equity_hkd"], 2_000_000)
+        self.assertAlmostEqual(result["account"]["equity_hkd"], guotou["equity_hkd"] + zheshang["equity_hkd"])
         self.assertAlmostEqual(guotou["total_pnl_pct"], -14491.6 / (4_030_922.32 / 7.8))
         self.assertAlmostEqual(result["account"]["total_pnl_pct"], -14491.6 / (6_030_922.32 / 7.8))
+
+    def test_hkd_equity_uses_the_same_live_fx_as_usd_account(self):
+        with patch.object(monitor.core, "quote_for_symbols", return_value={}), \
+             patch.object(monitor.core, "stock_split_events", return_value={"events": [], "warnings": []}), \
+             patch.object(monitor.core, "fx_rates_to_usd", return_value={"to_usd": {"USD": 1, "HKD": 0.125}}), \
+             patch.object(monitor.core, "period_return", return_value=None), \
+             patch.object(monitor, "period_return_ytd", return_value=None), \
+             patch.object(monitor, "load_dividend_records", return_value=[]):
+            result = monitor.compute_portfolio_from_trades([])
+        self.assertAlmostEqual(result["account"]["equity_hkd"], 6_030_922.32)
+        self.assertAlmostEqual(result["account"]["equity_usd"], 6_030_922.32 * 0.125)
 
 
 if __name__ == "__main__":

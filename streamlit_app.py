@@ -950,6 +950,7 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
         stats["realized_with_dividend_usd"] = stats.get("realized_pnl_usd", 0.0) + stats.get("dividend_pnl_usd", 0.0)
         stats["total_pnl_usd"] = stats["realized_with_dividend_usd"] + stats.get("unrealized_pnl_usd", 0.0)
         stats["equity_usd"] = stats.get("base_usd", 0.0) + stats["total_pnl_usd"]
+        stats["equity_hkd"] = stats["equity_usd"] / fx.get("HKD", 1 / 7.8)
         stats["total_pnl_pct"] = stats["total_pnl_usd"] / stats.get("base_usd", 1.0) if stats.get("base_usd") else 0.0
     realized_with_dividend_usd = realized_total_usd + dividend_total_usd
     total_pnl_usd = realized_with_dividend_usd + unrealized_total_usd
@@ -958,6 +959,7 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
         "account": {
             "base_usd": base_usd,
             "equity_usd": base_usd + total_pnl_usd,
+            "equity_hkd": (base_usd + total_pnl_usd) / fx.get("HKD", 1 / 7.8),
             "market_value_usd": market_value_total_usd,
             "total_pnl_usd": total_pnl_usd,
             "total_pnl_pct": total_pnl_usd / base_usd if base_usd else 0,
@@ -1951,7 +1953,8 @@ def render_overview(portfolio: dict[str, Any]) -> None:
     account = portfolio["account"]
     fx = portfolio["fx"]
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Account Equity", money(account["equity_usd"]))
+    c1.metric("Account Equity (USD)", money(account["equity_usd"]))
+    c1.caption(f"HKD Equity: {currency_amount(account['equity_hkd'], 'HKD')}")
     c2.metric("Total PnL", money(account["total_pnl_usd"]), pct(account["total_pnl_pct"]))
     c3.metric("Trading Realized", money(account["realized_pnl_usd"]))
     c4.metric("Dividend PnL", money(account.get("dividend_pnl_usd", 0)))
@@ -1973,7 +1976,8 @@ def render_overview(portfolio: dict[str, Any]) -> None:
                 {
                     "Broker": broker,
                     "Base": item.get("base_usd", 0),
-                    "Equity": item.get("equity_usd", 0),
+                    "Equity (USD)": item.get("equity_usd", 0),
+                    "Equity (HKD)": item.get("equity_hkd", 0),
                     "Market Value": item.get("market_value_usd", 0),
                     "Trading Realized": item.get("realized_pnl_usd", 0),
                     "Dividend PnL": item.get("dividend_pnl_usd", 0),
@@ -1987,7 +1991,8 @@ def render_overview(portfolio: dict[str, Any]) -> None:
         broker_styled = broker_view.style.format(
             {
                 "Base": "${:,.0f}",
-                "Equity": "${:,.0f}",
+                "Equity (USD)": "${:,.0f}",
+                "Equity (HKD)": "HK${:,.2f}",
                 "Market Value": "${:,.0f}",
                 "Trading Realized": "${:,.0f}",
                 "Dividend PnL": "${:,.0f}",
