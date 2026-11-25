@@ -55,6 +55,19 @@ class PositionClosureTests(unittest.TestCase):
         self.assertEqual(monitor.normalize_trade(imported)["date"], "")
         self.assertEqual(monitor.normalize_trade({**self.opening(), "date": "2026-05-20"})["date"], "2026-05-20")
 
+    def test_statement_base_updates_equity_and_return_without_resetting_pnl(self):
+        rows = [self.opening(), self.sale()]
+        result = self.calculate(rows)
+        guotou = result["broker_accounts"]["国投"]
+        zheshang = result["broker_accounts"]["浙商"]
+        self.assertEqual(guotou["base_hkd"], 4_030_922.32)
+        self.assertEqual(zheshang["base_hkd"], 2_000_000)
+        self.assertAlmostEqual(result["account"]["base_usd"], 6_030_922.32 / 7.8)
+        self.assertAlmostEqual(guotou["realized_pnl_usd"], -14491.6)
+        self.assertAlmostEqual(guotou["equity_usd"], 4_030_922.32 / 7.8 - 14491.6)
+        self.assertAlmostEqual(guotou["total_pnl_pct"], -14491.6 / (4_030_922.32 / 7.8))
+        self.assertAlmostEqual(result["account"]["total_pnl_pct"], -14491.6 / (6_030_922.32 / 7.8))
+
 
 if __name__ == "__main__":
     unittest.main()

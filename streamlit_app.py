@@ -31,7 +31,8 @@ LOCAL_DIVIDEND_PATH = DATA_DIR / "dividend_records.json"
 LOCAL_DIVIDEND_DELETED_PATH = DATA_DIR / "dividend_deleted_ids.json"
 BROKERS = ["国投", "浙商"]
 DEFAULT_BROKER = "国投"
-BROKER_BASE_HKD = {"国投": 4_000_000.0, "浙商": 2_000_000.0}
+# Guotou: total assets on the 2026-07-06 statement, not cash balance.
+BROKER_BASE_HKD = {"国投": 4_030_922.32, "浙商": 2_000_000.0}
 TRADE_HEADERS = [
     "id",
     "date",
@@ -819,13 +820,13 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
     realized_total_usd = 0.0
     broker_stats: dict[str, dict[str, float]] = {
         broker: {
-            "base_hkd": BROKER_BASE_HKD.get(broker, 4_000_000.0),
-            "base_usd": BROKER_BASE_HKD.get(broker, 4_000_000.0) * fx.get("HKD", 1 / 7.8),
+            "base_hkd": BROKER_BASE_HKD[broker],
+            "base_usd": BROKER_BASE_HKD[broker] * fx.get("HKD", 1 / 7.8),
             "market_value_usd": 0.0,
             "realized_pnl_usd": 0.0,
             "unrealized_pnl_usd": 0.0,
             "total_pnl_usd": 0.0,
-            "equity_usd": BROKER_BASE_HKD.get(broker, 4_000_000.0) * fx.get("HKD", 1 / 7.8),
+            "equity_usd": BROKER_BASE_HKD[broker] * fx.get("HKD", 1 / 7.8),
             "active_project_count": 0.0,
         }
         for broker in BROKERS
@@ -935,7 +936,7 @@ def compute_portfolio_from_trades(txs: list[dict[str, Any]]) -> dict[str, Any]:
     for holding in holdings:
         broker = holding.get("broker") if holding.get("broker") in BROKERS else DEFAULT_BROKER
         broker_stats[broker]["active_project_count"] += 1
-    base_hkd = sum(BROKER_BASE_HKD.get(broker, 4_000_000.0) for broker in BROKERS)
+    base_hkd = sum(BROKER_BASE_HKD[broker] for broker in BROKERS)
     base_usd = base_hkd * fx.get("HKD", 1 / 7.8)
     dividend_rows = load_dividend_records()
     dividend_total_usd = sum(to_float(row.get("net_usd")) for row in dividend_rows)
