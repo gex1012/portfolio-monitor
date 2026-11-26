@@ -1956,6 +1956,12 @@ def render_overview(portfolio: dict[str, Any]) -> None:
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Account Equity (USD)", money(account["equity_usd"]))
     c1.caption(f"HKD Equity: {currency_amount(account['equity_hkd'], 'HKD')}")
+    initial_total_hkd = sum(BROKER_BASE_HKD[broker] for broker in BROKERS)
+    st.caption(
+        f"Initial Equity: {currency_amount(initial_total_hkd, 'HKD')} ("
+        + " + ".join(f"{broker} {currency_amount(BROKER_BASE_HKD[broker], 'HKD')}" for broker in BROKERS)
+        + ")"
+    )
     c2.metric("Total PnL", money(account["total_pnl_usd"]), pct(account["total_pnl_pct"]))
     c3.metric("Trading Realized", money(account["realized_pnl_usd"]))
     c4.metric("Dividend PnL", money(account.get("dividend_pnl_usd", 0)))
@@ -1976,7 +1982,8 @@ def render_overview(portfolio: dict[str, Any]) -> None:
             broker_rows.append(
                 {
                     "Broker": broker,
-                    "Base": item.get("base_usd", 0),
+                    "Initial Equity (HKD)": item.get("base_hkd", BROKER_BASE_HKD.get(broker, 0)),
+                    "Initial Equity (USD)": item.get("base_usd", 0),
                     "Equity (USD)": item.get("equity_usd", 0),
                     "Equity (HKD)": item.get("equity_hkd", 0),
                     "Market Value": item.get("market_value_usd", 0),
@@ -1991,7 +1998,8 @@ def render_overview(portfolio: dict[str, Any]) -> None:
         broker_view = pd.DataFrame(broker_rows)
         broker_styled = broker_view.style.format(
             {
-                "Base": "${:,.0f}",
+                "Initial Equity (HKD)": "HK${:,.2f}",
+                "Initial Equity (USD)": "${:,.0f}",
                 "Equity (USD)": "${:,.0f}",
                 "Equity (HKD)": "HK${:,.2f}",
                 "Market Value": "${:,.0f}",

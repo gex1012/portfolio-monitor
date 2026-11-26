@@ -34,6 +34,18 @@ class EquityViewTests(unittest.TestCase):
         self.assertIn("Equity (HKD)", table.columns)
         self.assertAlmostEqual(table["Equity (HKD)"].sum(), 6_363_970.42)
 
+    def test_initial_equity_shown_for_each_broker_and_total(self):
+        app = AppTest.from_string(HARNESS, default_timeout=20).run()
+        self.assertEqual(len(app.exception), 0)
+        table = app.dataframe[0].value.set_index("Broker")
+        self.assertAlmostEqual(table.loc["国投", "Initial Equity (HKD)"], 4_363_970.42)
+        self.assertAlmostEqual(table.loc["浙商", "Initial Equity (HKD)"], 2_000_000.0)
+        self.assertAlmostEqual(table.loc["国投", "Initial Equity (USD)"], 4_363_970.42 * 0.125)
+        self.assertNotIn("Base", table.columns)
+        caption = next(c.value for c in app.caption if c.value.startswith("Initial Equity"))
+        for text in ["HK$6,363,970.42", "国投 HK$4,363,970.42", "浙商 HK$2,000,000.00"]:
+            self.assertIn(text, caption)
+
 
 if __name__ == "__main__":
     unittest.main()
