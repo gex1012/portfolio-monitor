@@ -246,15 +246,49 @@ def fee_rate_for_trade(symbol: str, currency: str, exchange: str | None = None) 
     return 0.002
 
 
+# Guotou Hong Kong charges, each verified line by line against itemised contract
+# notes (2026-04-08 0386.HK buy, 2026-04-29 9618.HK sell). Statutory rates are set
+# by HKEX/SFC/AFRC and the Stamp Office: update this table when they change.
+GUOTOU_HK_RATES = {
+    "commission": Decimal("0.001"),      # minimum HKD 100 per contract note
+    "stamp": Decimal("0.001"),           # rounded UP to the next whole dollar
+    "settlement": Decimal("0.000042"),
+    "trans_levy": Decimal("0.000027"),
+    "afrc_levy": Decimal("0.0000015"),
+    "trading_fee": Decimal("0.0000565"),
+}
+GUOTOU_HK_MIN_COMMISSION = Decimal("100")
+GUOTOU_US_MIN_COMMISSION = Decimal("20")
+
+
+def guotou_hk_fee(quantity: float, price: float) -> dict[str, float]:
+    """Itemised Guotou HK charges; every item is rounded to cents on its own."""
+    cent = Decimal("0.01")
+    notional = Decimal(str(abs(quantity))) * Decimal(str(abs(price)))
+    if notional <= 0:
+        return {key: 0.0 for key in [*GUOTOU_HK_RATES, "total"]}
+    fees = {key: (notional * rate).quantize(cent, rounding=ROUND_HALF_UP)
+            for key, rate in GUOTOU_HK_RATES.items()}
+    fees["commission"] = max(GUOTOU_HK_MIN_COMMISSION, fees["commission"])
+    fees["stamp"] = (notional * GUOTOU_HK_RATES["stamp"]).quantize(Decimal("1"), rounding=ROUND_CEILING)
+    result = {key: float(value) for key, value in fees.items()}
+    result["total"] = float(sum(fees.values()))
+    return result
+
+
 def guotou_us_fee(quantity: float, price: float, side: str, trade_date: Any) -> dict[str, float]:
     timestamp = pd.to_datetime(trade_date, errors="raise")
     if timestamp.tzinfo is not None:
         timestamp = timestamp.tz_convert("Asia/Hong_Kong")
+    cent = Decimal("0.01")
     notional = Decimal(str(abs(quantity))) * Decimal(str(abs(price)))
-    commission = notional * Decimal("0.002")
+    if notional <= 0:
+        return {"commission": 0.0, "sec": 0.0, "total": 0.0}
+    # 0.2% of notional, minimum USD 20 per contract note, rounded to cents.
+    commission = max(GUOTOU_US_MIN_COMMISSION, (notional * Decimal("0.002")).quantize(cent, rounding=ROUND_HALF_UP))
     sec = Decimal("0")
     if str(side).upper().startswith("S") and timestamp.date() >= dt.date(2026, 4, 4):
-        sec = (notional * Decimal("0.0000206")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+        sec = (notional * Decimal("0.0000206")).quantize(cent, rounding=ROUND_CEILING)
     return {"commission": float(commission), "sec": float(sec), "total": float(commission + sec)}
 
 
@@ -287,6 +321,8 @@ def calculated_fee(symbol: str, quantity: float, price: float, currency: str, ex
         return zheshang_us_fee(quantity, price, side, trade_date or dt.date.today())["total"]
     if broker in ("", "国投") and currency.upper() == "USD" and not is_hk_symbol(fmp_symbol(symbol)) and "HK" not in str(exchange or "").upper():
         return guotou_us_fee(quantity, price, side, trade_date or dt.date.today())["total"]
+    if broker in ("", "国投") and (is_hk_symbol(fmp_symbol(symbol)) or currency.upper() == "HKD" or "HK" in str(exchange or "").upper()):
+        return guotou_hk_fee(quantity, price)["total"]
     return abs(quantity * price) * fee_rate_for_trade(symbol, currency, exchange)
 
 
