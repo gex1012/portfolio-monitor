@@ -60,16 +60,16 @@ class PositionClosureTests(unittest.TestCase):
         result = self.calculate(rows)
         guotou = result["broker_accounts"]["国投"]
         zheshang = result["broker_accounts"]["浙商"]
-        self.assertEqual(guotou["base_hkd"], 4_030_922.32)
+        self.assertEqual(guotou["base_hkd"], 4_363_970.42)
         self.assertEqual(zheshang["base_hkd"], 2_000_000)
-        self.assertAlmostEqual(result["account"]["base_usd"], 6_030_922.32 / 7.8)
+        self.assertAlmostEqual(result["account"]["base_usd"], 6_363_970.42 / 7.8)
         self.assertAlmostEqual(guotou["realized_pnl_usd"], -14491.6)
-        self.assertAlmostEqual(guotou["equity_usd"], 4_030_922.32 / 7.8 - 14491.6)
-        self.assertAlmostEqual(guotou["equity_hkd"], 4_030_922.32 - 14491.6 * 7.8)
+        self.assertAlmostEqual(guotou["equity_usd"], 4_363_970.42 / 7.8 - 14491.6)
+        self.assertAlmostEqual(guotou["equity_hkd"], 4_363_970.42 - 14491.6 * 7.8)
         self.assertAlmostEqual(zheshang["equity_hkd"], 2_000_000)
         self.assertAlmostEqual(result["account"]["equity_hkd"], guotou["equity_hkd"] + zheshang["equity_hkd"])
-        self.assertAlmostEqual(guotou["total_pnl_pct"], -14491.6 / (4_030_922.32 / 7.8))
-        self.assertAlmostEqual(result["account"]["total_pnl_pct"], -14491.6 / (6_030_922.32 / 7.8))
+        self.assertAlmostEqual(guotou["total_pnl_pct"], -14491.6 / (4_363_970.42 / 7.8))
+        self.assertAlmostEqual(result["account"]["total_pnl_pct"], -14491.6 / (6_363_970.42 / 7.8))
 
     def test_hkd_equity_uses_the_same_live_fx_as_usd_account(self):
         with patch.object(monitor.core, "quote_for_symbols", return_value={}), \
@@ -79,8 +79,14 @@ class PositionClosureTests(unittest.TestCase):
              patch.object(monitor, "period_return_ytd", return_value=None), \
              patch.object(monitor, "load_dividend_records", return_value=[]):
             result = monitor.compute_portfolio_from_trades([])
-        self.assertAlmostEqual(result["account"]["equity_hkd"], 6_030_922.32)
-        self.assertAlmostEqual(result["account"]["equity_usd"], 6_030_922.32 * 0.125)
+        self.assertAlmostEqual(result["account"]["equity_hkd"], 6_363_970.42)
+        self.assertAlmostEqual(result["account"]["equity_usd"], 6_363_970.42 * 0.125)
+
+    def test_guotou_funding_includes_legacy_net_sales_and_net_dividends_once(self):
+        from decimal import Decimal as D
+        hkd = D('955878.08') + D('1571809.42') + D('1769329.09') + D('9185.74')
+        expected = (hkd + D('7366.50') * D('7.842')).quantize(D('0.01'))
+        self.assertEqual(D(str(monitor.BROKER_BASE_HKD['国投'])), expected)
 
 
 if __name__ == "__main__":

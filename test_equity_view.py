@@ -28,11 +28,11 @@ class EquityViewTests(unittest.TestCase):
         app = AppTest.from_string(HARNESS, default_timeout=20).run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(any(metric.label == "Account Equity (USD)" for metric in app.metric))
-        self.assertTrue(any("HK$6,030,922.32" in caption.value for caption in app.caption))
+        self.assertTrue(any("HK$6,363,970.42" in caption.value for caption in app.caption))
         table = app.dataframe[0].value
         self.assertIn("Equity (USD)", table.columns)
         self.assertIn("Equity (HKD)", table.columns)
-        self.assertAlmostEqual(table["Equity (HKD)"].sum(), 6_030_922.32)
+        self.assertAlmostEqual(table["Equity (HKD)"].sum(), 6_363_970.42)
 
 
 if __name__ == "__main__":

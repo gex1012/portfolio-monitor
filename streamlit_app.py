@@ -31,8 +31,9 @@ LOCAL_DIVIDEND_PATH = DATA_DIR / "dividend_records.json"
 LOCAL_DIVIDEND_DELETED_PATH = DATA_DIR / "dividend_deleted_ids.json"
 BROKERS = ["国投", "浙商"]
 DEFAULT_BROKER = "国投"
-# Guotou: total assets on the 2026-07-06 statement, not cash balance.
-BROKER_BASE_HKD = {"国投": 4_030_922.32, "浙商": 2_000_000.0}
+# Guotou: approved cumulative funding through July, including legacy net sales
+# and dividends, translated using the 2026-07-31 statement USD/HKD of 7.842.
+BROKER_BASE_HKD = {"国投": 4_363_970.42, "浙商": 2_000_000.0}
 TRADE_HEADERS = [
     "id",
     "date",
