@@ -2143,6 +2143,10 @@ def render_trade_record_manager(role: str, user: str) -> None:
     c1, c2, c3, c4 = st.columns(4)
     try:
         timestamp = pd.to_datetime(edit_row.get("date"), errors="coerce")
+        # The cloud ledger returns dates as UTC instants of midnight UTC+8; taking the
+        # UTC date would move the trade one day earlier on every save.
+        if pd.notna(timestamp) and timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert("Asia/Hong_Kong")
         edit_date_default = timestamp.date() if pd.notna(timestamp) else None
     except Exception:
         edit_date_default = today
@@ -2257,7 +2261,18 @@ def confirm_trade_dialog(role: str, user: str) -> None:
         a, b = st.columns(2)
         a.metric("佣金", currency_amount(fees["commission"], "USD"))
         b.metric("SEC 监管费（卖出）", currency_amount(fees["sec"], "USD"))
-        st.caption("国投美股：佣金为成交金额的 0.2%；卖出另加按日期适用的 SEC 费，向上取至美分。买入不收 SEC 费。")
+        st.caption("国投美股：佣金为成交金额的 0.2%，每单最低 US$20；卖出另加按日期适用的 SEC 费，向上取至美分。买入不收 SEC 费。同一成交单的分笔成交请合并录入，否则最低佣金会被重复计算。")
+    if broker == "国投" and (trade["currency"] == "HKD" or core.is_hk_symbol(trade["fmp_symbol"])):
+        fees = core.guotou_hk_fee(trade["quantity"], trade["price"])
+        a, b, c = st.columns(3)
+        a.metric("佣金", currency_amount(fees["commission"], "HKD"))
+        b.metric("印花税", currency_amount(fees["stamp"], "HKD"))
+        c.metric("交收费", currency_amount(fees["settlement"], "HKD"))
+        d, e, f = st.columns(3)
+        d.metric("交易征费", currency_amount(fees["trans_levy"], "HKD"))
+        e.metric("会财局征费", currency_amount(fees["afrc_levy"], "HKD"))
+        f.metric("交易费", currency_amount(fees["trading_fee"], "HKD"))
+        st.caption("国投港股：佣金 0.1%（每单最低 HK$100）、印花税 0.1%（向上取整到元）、交收费 0.0042%、交易征费 0.0027%、会财局征费 0.00015%、交易费 0.00565%，各项分别四舍五入到分。同一成交单的分笔成交请合并录入；免印花税的品种（如部分 ETF）或与结单不符时请手动指定总费用。")
     manual = st.checkbox("手动指定总手续费", value=not pending["auto_fee"], key=f"confirm_manual_fee_{trade_id}")
     fee = st.number_input("总手续费", min_value=0.0, value=float(trade["fee"]), step=0.01,
                           key=f"confirm_fee_{trade_id}") if manual else auto_fee
