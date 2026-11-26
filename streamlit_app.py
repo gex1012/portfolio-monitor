@@ -140,6 +140,41 @@ def clean_text(value: Any) -> str:
     return text.strip()
 
 
+LEDGER_TIMEZONE = "Asia/Hong_Kong"
+
+
+def local_date(value: Any) -> dt.date | None:
+    """Calendar date (UTC+8) of a stored trade or dividend date.
+
+    The cloud ledger returns a date as the UTC instant of midnight UTC+8, so
+    2026-06-29 comes back as 2026-06-28T16:00:00.000Z. Taking the first ten
+    characters gives the previous day; convert to UTC+8 first.
+    """
+    text = clean_text(value)
+    if not text:
+        return None
+    timestamp = pd.to_datetime(text, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert(LEDGER_TIMEZONE)
+    return timestamp.date()
+
+
+def local_date_text(value: Any) -> str:
+    day = local_date(value)
+    return day.isoformat() if day else clean_text(value)[:10]
+
+
+def with_local_dates(frame: pd.DataFrame, column: str = "date") -> pd.DataFrame:
+    """Copy of a table with its date column shown as UTC+8 calendar dates."""
+    if frame.empty or column not in frame.columns:
+        return frame
+    shown = frame.copy()
+    shown[column] = shown[column].map(local_date_text)
+    return shown
+
+
 def google_sheet_enabled() -> bool:
     return bool(secret_value("google_sheets", "sheet_id", default="") and secret_value("gcp_service_account", "client_email", default=""))
 
@@ -2113,7 +2148,7 @@ def render_trade_record_manager(role: str, user: str) -> None:
     if trades.empty:
         st.info("No trade records available.")
         return
-    trades["date_dt"] = pd.to_datetime(trades["date"], errors="coerce")
+    trades["date_dt"] = pd.to_datetime(trades["date"].map(local_date_text), errors="coerce")
     today = dt.date.today()
     min_date = trades["date_dt"].dropna().dt.date.min() if trades["date_dt"].notna().any() else today
     max_date = trades["date_dt"].dropna().dt.date.max() if trades["date_dt"].notna().any() else today
@@ -2139,7 +2174,7 @@ def render_trade_record_manager(role: str, user: str) -> None:
 
     records = filtered.to_dict("records")
     labels = [
-        f"{clean_text(row.get('date'))[:10] or '-'} | {clean_text(row.get('side'))} | "
+        f"{local_date_text(row.get('date')) or '-'} | {clean_text(row.get('side'))} | "
         f"{clean_text(row.get('broker')) or DEFAULT_BROKER} | {clean_text(row.get('fmp_symbol'))} | {to_float(row.get('quantity')):,.0f} @ {to_float(row.get('price')):,.2f} | "
         f"{clean_text(row.get('id'))[-8:]}"
         for row in records
@@ -2150,12 +2185,8 @@ def render_trade_record_manager(role: str, user: str) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     try:
-        timestamp = pd.to_datetime(edit_row.get("date"), errors="coerce")
-        # The cloud ledger returns dates as UTC instants of midnight UTC+8; taking the
-        # UTC date would move the trade one day earlier on every save.
-        if pd.notna(timestamp) and timestamp.tzinfo is not None:
-            timestamp = timestamp.tz_convert("Asia/Hong_Kong")
-        edit_date_default = timestamp.date() if pd.notna(timestamp) else None
+        # UTC+8 date: the UTC date would move the trade one day earlier on every save.
+        edit_date_default = local_date(edit_row.get("date"))
     except Exception:
         edit_date_default = today
     edit_date = c1.date_input("Trade date", value=edit_date_default, key=f"edit_trade_date_{edit_id}")
@@ -2524,6 +2555,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
             "created_by": "By",
         }
     )
+    view = with_local_dates(view, "Date")
     styled = view.style.format(
         {
             "Shares": "{:,.0f}",
@@ -2543,7 +2575,7 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
     st.markdown("#### Edit / Delete Dividend Record")
     editable_records = records.to_dict("records")
     labels = [
-        f"{clean_text(row.get('date'))} | {clean_text(row.get('broker')) or DEFAULT_BROKER} | {clean_text(row.get('symbol'))} | "
+        f"{local_date_text(row.get('date'))} | {clean_text(row.get('broker')) or DEFAULT_BROKER} | {clean_text(row.get('symbol'))} | "
         f"{currency_amount(row.get('net_amount'), clean_text(row.get('currency')))} | {clean_text(row.get('id'))[-8:]}"
         for row in editable_records
     ]
@@ -2552,10 +2584,8 @@ def render_dividends(portfolio: dict[str, Any], role: str, user: str) -> None:
     edit_id = clean_text(edit_row.get("id"))
 
     e1, e2, e3, e4 = st.columns(4)
-    try:
-        edit_date_default = dt.date.fromisoformat(clean_text(edit_row.get("date"))[:10])
-    except Exception:
-        edit_date_default = dt.date.today()
+    # UTC+8 date: the UTC date would move the dividend one day earlier on every save.
+    edit_date_default = local_date(edit_row.get("date")) or dt.date.today()
     edit_date = e1.date_input("Edit date", value=edit_date_default, key=f"edit_div_date_{edit_id}")
     edit_broker_default = clean_text(edit_row.get("broker")) or DEFAULT_BROKER
     edit_broker_idx = BROKERS.index(edit_broker_default) if edit_broker_default in BROKERS else 0
@@ -3631,16 +3661,16 @@ def render_admin(role: str, portfolio: dict[str, Any]) -> None:
     c2.metric("Dividend PnL", money(account.get("dividend_pnl_usd", 0)))
     c3.metric("Realized incl. Dividends", money(account.get("realized_with_dividend_usd", 0)))
     st.subheader("Transactions")
-    st.dataframe(pd.DataFrame(portfolio["transactions"]), width="stretch", hide_index=True)
+    st.dataframe(with_local_dates(pd.DataFrame(portfolio["transactions"])), width="stretch", hide_index=True)
     st.subheader("Trading Realized PnL")
-    st.dataframe(pd.DataFrame(portfolio["realized"]), width="stretch", hide_index=True)
+    st.dataframe(with_local_dates(pd.DataFrame(portfolio["realized"])), width="stretch", hide_index=True)
     st.subheader("Dividend PnL")
     dividend_records = pd.DataFrame(portfolio.get("dividends", []))
     if dividend_records.empty:
         st.info("No dividend PnL records yet.")
     else:
         dividend_records = dividend_records.sort_values("date", ascending=False)
-        st.dataframe(dividend_records, width="stretch", hide_index=True)
+        st.dataframe(with_local_dates(dividend_records), width="stretch", hide_index=True)
     if role == "admin":
         st.subheader("Audit Log")
         audit = pd.DataFrame(load_audit())
